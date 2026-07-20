@@ -1,0 +1,14 @@
+MebloProjekt 0.1.0 — status prototypu
+
+ZWERYFIKOWANE:
+- czysty silnik obliczeń Kotlin kompiluje się,
+- test podstawowych reguł zakończony powodzeniem,
+- szerokość wewnętrzna 600 mm / płyta 18 mm = 564 mm,
+- korpus 280 mm + front nakładany 18 mm = 298 mm głębokości całkowitej,
+- front wpuszczany cofa półki o 18 + 2 = 20 mm,
+- plecy HDF mają po 1 mm luzu z każdej strony.
+
+NIEZWERYFIKOWANE W TYM ŚRODOWISKU:
+- pełna kompilacja APK, ponieważ w środowisku wykonawczym nie ma Android SDK i dostępu sieciowego do jego pobrania.
+
+Projekt jest przygotowany do otwarcia w Android Studio i zbudowania po zainstalowaniu Android SDK 36.
