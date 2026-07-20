@@ -92,7 +92,7 @@ private data class SavedProject(
     val calculation: CabinetCalculation
 )
 
-private class AppViewModel : ViewModel() {
+class AppViewModel : ViewModel() {
     var screen by mutableStateOf(Screen.PROJECTS)
     var currentCalculation by mutableStateOf<CabinetCalculation?>(null)
     val projects = mutableStateListOf<SavedProject>()
