@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
+const storage = {
+  async get(key) {
+    const value = window.localStorage.getItem(key);
+    return value === null ? null : { value };
+  },
+  async set(key, value) {
+    window.localStorage.setItem(key, value);
+  },
+};
+
 /* ============================================================
    SZAFKI — poziomy, kolumny, przegrody
    ============================================================ */
@@ -2564,7 +2574,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("szafki:projekt");
+        const r = await storage.get("szafki:projekt");
         if (r) {
           const d = JSON.parse(r.value);
           const migratable = d.cab && d.cab.levels && Array.isArray(d.cab.levels);
@@ -2597,7 +2607,7 @@ export default function App() {
     if (!loaded) return;
     const id = setTimeout(async () => {
       try {
-        await window.storage.set("szafki:projekt", JSON.stringify({ cab, mat }));
+        await storage.set("szafki:projekt", JSON.stringify({ cab, mat }));
         setSaved("zapisano " + new Date().toLocaleTimeString("pl-PL"));
       } catch (e) {
         setSaved("nie udało się zapisać");
