@@ -39,6 +39,8 @@ http://localhost:5173/preview.html
 
 `preview.html` ładuje React, ReactDOM, Babel Standalone i Tailwind z CDN, pobiera lokalny plik `szafki.jsx`, kompiluje JSX w przeglądarce i montuje aplikację w `#root`.
 
+Jeśli chcesz otwierać podgląd bez uruchamiania serwera na swoim komputerze, workflow `Deploy Web Preview` publikuje statyczny podgląd na GitHub Pages po wypchnięciu zmian na `main`/`master` albo po ręcznym uruchomieniu z zakładki Actions. Po pierwszym wdrożeniu link będzie dostępny w środowisku `github-pages` dla tego workflow.
+
 ## Budowanie
 
 Projekt jest skonfigurowany dla Android SDK 36, AGP 8.13.2, Kotlin 2.3.21 i Jetpack Compose.
