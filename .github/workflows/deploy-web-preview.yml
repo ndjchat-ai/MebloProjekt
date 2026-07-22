@@ -18,7 +18,7 @@ jobs:
   deploy:
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}preview.html
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -27,7 +27,8 @@ jobs:
       - name: Prepare static preview
         run: |
           mkdir web-preview
-          cp preview.html szafki.jsx web-preview/
+          cp standalone.html web-preview/index.html
+          cp standalone.html preview.html szafki.jsx web-preview/
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

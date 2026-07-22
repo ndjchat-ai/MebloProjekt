@@ -39,7 +39,9 @@ http://localhost:5173/preview.html
 
 `preview.html` ładuje React, ReactDOM, Babel Standalone i Tailwind z CDN, pobiera lokalny plik `szafki.jsx`, kompiluje JSX w przeglądarce i montuje aplikację w `#root`.
 
-Jeśli chcesz otwierać podgląd bez uruchamiania serwera na swoim komputerze, workflow `Deploy Web Preview` publikuje statyczny podgląd na GitHub Pages po wypchnięciu zmian na `main`/`master` albo po ręcznym uruchomieniu z zakładki Actions. Po pierwszym wdrożeniu link będzie dostępny w środowisku `github-pages` dla tego workflow.
+Po włączeniu GitHub Pages ze źródłem `GitHub Actions`, workflow `Deploy Web Preview` publikuje podgląd automatycznie po zmianach na `main`/`master` albo ręcznie z zakładki Actions. Strona główna Pages używa `standalone.html` jako `index.html`, więc link GitHub Pages otwiera aplikację od razu.
+
+Jeśli nie chcesz używać Pages, możesz też pobrać `standalone.html` z repozytorium i otworzyć go dwuklikiem w przeglądarce. Plik zawiera kod aplikacji w środku, więc nie potrzebuje `localhost`; wymaga tylko internetu do pobrania React, Babel i Tailwind z CDN.
 
 ## Budowanie
 
