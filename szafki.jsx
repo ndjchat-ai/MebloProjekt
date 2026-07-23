@@ -2778,11 +2778,11 @@ function Scene3D({ cab, geo, mat, open, yaw, pitch, angle }) {
 /* ---------- kontrolki ---------- */
 
 const Field = ({ label, children, hint }) => (
-  <label className="block">
-    <span className="block text-xs uppercase tracking-wider text-stone-500 mb-1">{label}</span>
+  <div className="block">
+    <div className="block text-xs uppercase tracking-wider text-stone-500 mb-1">{label}</div>
     {children}
-    {hint && <span className="block text-xs text-stone-400 mt-1">{hint}</span>}
-  </label>
+    {hint && <div className="block text-xs text-stone-400 mt-1">{hint}</div>}
+  </div>
 );
 
 const Num = ({ value, onChange, min, max, suffix = "mm" }) => (
@@ -2810,7 +2810,7 @@ const AutoNum = ({ value, placeholder, onChange, fixed, warn }) => (
 const Seg = ({ value, onChange, options }) => (
   <div className="flex rounded border border-stone-300 overflow-hidden">
     {options.map((o) => (
-      <button key={o.v} onClick={() => onChange(o.v)}
+      <button key={o.v} type="button" onClick={() => onChange(o.v)}
         className={"flex-1 px-2 py-1.5 text-xs transition-colors " +
           (value === o.v ? "bg-teal-700 text-white" : "bg-white text-stone-600 hover:bg-stone-100")}>
         {o.l}
@@ -2853,7 +2853,7 @@ const NoteLine = ({ text, color, icon, editLevels, cab }) => {
       <span>
         {txt}
         {btn && (
-          <button onClick={btn.run}
+          <button type="button" onClick={btn.run}
             className="ml-2 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-teal-700">
             {btn.label}
           </button>
@@ -2864,7 +2864,7 @@ const NoteLine = ({ text, color, icon, editLevels, cab }) => {
 };
 
 const MiniBtn = ({ onClick, children, tone = "plain", title }) => (
-  <button onClick={onClick} title={title}
+  <button type="button" onClick={onClick} title={title}
     className={"rounded border px-1.5 py-0.5 text-[11px] transition-colors " +
       (tone === "on"
         ? "border-teal-700 bg-teal-700 text-white"
@@ -2991,9 +2991,11 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("szafki:projekt");
-        if (r) {
-          const d = JSON.parse(r.value);
+        const stored = window.storage?.get
+          ? await window.storage.get("szafki:projekt")
+          : { value: window.localStorage?.getItem("szafki:projekt") };
+        if (stored?.value) {
+          const d = JSON.parse(stored.value);
           const migratable = d.cab && d.cab.levels && Array.isArray(d.cab.levels);
           if (migratable) {
             // migracja: dokladamy nowe pola z domyslnych, zachowujac cala strukture wnetrza
@@ -3025,7 +3027,9 @@ export default function App() {
     if (!loaded) return;
     const id = setTimeout(async () => {
       try {
-        await window.storage.set("szafki:projekt", JSON.stringify({ cab, mat }));
+        const payload = JSON.stringify({ cab, mat });
+        if (window.storage?.set) await window.storage.set("szafki:projekt", payload);
+        else window.localStorage?.setItem("szafki:projekt", payload);
         setSaved("zapisano " + new Date().toLocaleTimeString("pl-PL"));
       } catch (e) {
         setSaved("nie udało się zapisać");
@@ -3241,48 +3245,48 @@ export default function App() {
             className="min-w-0 flex-1 border-b border-transparent bg-transparent text-lg font-semibold tracking-tight focus:border-teal-700 focus:outline-none" />
           <span className="font-mono text-xs text-stone-400">{saved}</span>
           <div className="flex items-center gap-1">
-            <button onClick={undo} disabled={!histLen.undo}
+            <button type="button" onClick={undo} disabled={!histLen.undo}
               title="Cofnij (Ctrl+Z)"
               className="rounded px-2 py-1 text-xs font-medium disabled:opacity-30 enabled:hover:bg-stone-200">
               ↶ Cofnij
             </button>
-            <button onClick={redo} disabled={!histLen.redo}
+            <button type="button" onClick={redo} disabled={!histLen.redo}
               title="Ponów (Ctrl+Shift+Z)"
               className="rounded px-2 py-1 text-xs font-medium disabled:opacity-30 enabled:hover:bg-stone-200">
               Ponów ↷
             </button>
           </div>
-          <button onClick={exportProject}
+          <button type="button" onClick={exportProject}
             className="text-xs text-teal-700 hover:underline">Kopiuj projekt</button>
-          <button onClick={() => setTransfer({ mode: "import", text: "" })}
+          <button type="button" onClick={() => setTransfer({ mode: "import", text: "" })}
             className="text-xs text-teal-700 hover:underline">Wklej projekt</button>
           <label className="cursor-pointer text-xs text-teal-700 hover:underline">
             Wczytaj plik
             <input type="file" accept="application/json,.json,.txt" className="hidden"
               onChange={importProject} />
           </label>
-          <button onClick={() => {
+          <button type="button" onClick={() => {
               if (window.confirm("Zacząć nowy projekt? Bieżący zostanie wyczyszczony — można go cofnąć przyciskiem Cofnij.")) {
                 setCab(defaultCab); setMat(defaultMaterials); setSaved("nowy projekt");
               }
             }}
             className="text-xs text-stone-500 hover:text-stone-800 hover:underline">Nowy projekt</button>
           {errors.length > 0 && (
-            <button onClick={scrollToNotes} title="Przejdź do uwag"
+            <button type="button" onClick={scrollToNotes} title="Przejdź do uwag"
               className="rounded-full px-2.5 py-1 text-xs font-medium transition hover:brightness-95"
               style={{ background: "#fee2e2", color: ERRC }}>
               {errors.length} błąd{errors.length > 1 ? "y" : ""}
             </button>
           )}
           {warns.length > 0 && (
-            <button onClick={scrollToNotes} title="Przejdź do uwag"
+            <button type="button" onClick={scrollToNotes} title="Przejdź do uwag"
               className="rounded-full px-2.5 py-1 text-xs font-medium transition hover:brightness-95"
               style={{ background: "#fef3c7", color: WARNC }}>
               {warns.length} ostrzeżeń
             </button>
           )}
           {infos.length > 0 && (
-            <button onClick={scrollToNotes} title="Przejdź do podpowiedzi"
+            <button type="button" onClick={scrollToNotes} title="Przejdź do podpowiedzi"
               className="rounded-full px-2.5 py-1 text-xs font-medium text-stone-600 transition hover:brightness-95"
               style={{ background: "#e7e5e4" }}>
               {infos.length} {infos.length === 1 ? "podpowiedź" : "podpowiedzi"}
@@ -3584,7 +3588,7 @@ export default function App() {
                               </div>
                             ))}
                             {rawCol.doors > 1 && (
-                              <button onClick={() => clearDoorWidths(lv.i, c.j)}
+                              <button type="button" onClick={() => clearDoorWidths(lv.i, c.j)}
                                 className="text-[11px] text-teal-700 hover:underline">
                                 równe szerokości
                               </button>
@@ -3713,7 +3717,7 @@ export default function App() {
                             ))}
                             <div className="flex items-center gap-2 pt-1">
                               <MiniBtn onClick={() => addShelf(lv.i, c.j)} tone="accent">+ półka</MiniBtn>
-                              <button onClick={() => clearColOpenings(lv.i, c.j)}
+                              <button type="button" onClick={() => clearColOpenings(lv.i, c.j)}
                                 className="text-[11px] text-teal-700 hover:underline">wszystkie równo</button>
                             </div>
                           </div>
@@ -4041,7 +4045,7 @@ export default function App() {
                 {k !== "mirror" && (
                   <div className="flex flex-wrap gap-1">
                     {PALETA.map(([nazwa, hex]) => (
-                      <button key={hex} title={nazwa}
+                      <button type="button" key={hex} title={nazwa}
                         onClick={() => setMat({ ...mat, [k]: { ...mat[k], color: hex } })}
                         className={"h-6 w-6 rounded border transition-transform hover:scale-110 " +
                           (mat[k].color.toLowerCase() === hex.toLowerCase()
@@ -4062,33 +4066,33 @@ export default function App() {
           <Card title="Rysunek"
             right={
               <div className="flex items-center gap-3">
-                <button onClick={() => setShowDims((s) => !s)} className="text-xs text-teal-700 hover:underline">
+                <button type="button" onClick={() => setShowDims((s) => !s)} className="text-xs text-teal-700 hover:underline">
                   {showDims ? "Ukryj wymiary" : "Pokaż wymiary"}
                 </button>
                 {view === "closed" && (
-                  <button onClick={() => setShowGaps((s) => !s)}
+                  <button type="button" onClick={() => setShowGaps((s) => !s)}
                     className="text-xs text-teal-700 hover:underline">
                     {showGaps ? "Ukryj szczeliny" : "Pokaż szczeliny"}
                   </button>
                 )}
-                <button onClick={() => set({ realColors: !cab.realColors })}
+                <button type="button" onClick={() => set({ realColors: !cab.realColors })}
                   className="text-xs text-teal-700 hover:underline">
                   {cab.realColors ? "Rozróżnij fronty" : "Realne kolory"}
                 </button>
                 {view === "side" && (
-                  <button onClick={() => setSideWhich((s) => (s === "left" ? "right" : "left"))}
+                  <button type="button" onClick={() => setSideWhich((s) => (s === "left" ? "right" : "left"))}
                     className="text-xs text-teal-700 hover:underline">
                     {sideWhich === "left" ? "Pokaż prawy bok" : "Pokaż lewy bok"}
                   </button>
                 )}
                 {view === "top" && (
-                  <button onClick={() => setShowShelves((s) => !s)}
+                  <button type="button" onClick={() => setShowShelves((s) => !s)}
                     className="text-xs text-teal-700 hover:underline">
                     {showShelves ? "Ukryj półki" : "Rysuj półki"}
                   </button>
                 )}
                 {(view === "closed" || view === "open") && (
-                  <button onClick={() => setShowLabels((s) => !s)}
+                  <button type="button" onClick={() => setShowLabels((s) => !s)}
                     className="text-xs text-teal-700 hover:underline">
                     {showLabels ? "Ukryj oznaczenia" : "Oznacz pola"}
                   </button>
@@ -4242,7 +4246,7 @@ export default function App() {
           <Card title="Formatki do zamówienia"
             right={
               Object.keys(cab.edgeOverrides || {}).length > 0 ? (
-                <button onClick={() => set({ edgeOverrides: {} })} className="text-xs text-teal-700 hover:underline">
+                <button type="button" onClick={() => set({ edgeOverrides: {} })} className="text-xs text-teal-700 hover:underline">
                   Wróć do automatycznego oklejania
                 </button>
               ) : null
@@ -4360,10 +4364,10 @@ export default function App() {
               onFocus={(e) => transfer.mode === "export" && e.target.select()}
               className="h-64 w-full rounded border border-stone-300 p-2 font-mono text-[11px] focus:border-teal-600 focus:outline-none" />
             <div className="mt-3 flex justify-end gap-2">
-              <button onClick={() => setTransfer(null)}
+              <button type="button" onClick={() => setTransfer(null)}
                 className="rounded px-3 py-1.5 text-sm text-stone-600 hover:bg-stone-100">Zamknij</button>
               {transfer.mode === "export" ? (
-                <button
+                <button type="button"
                   onClick={async () => {
                     try { await navigator.clipboard.writeText(transfer.text); setSaved("skopiowano do schowka"); }
                     catch { setSaved("zaznacz tekst i skopiuj ręcznie"); }
@@ -4372,7 +4376,7 @@ export default function App() {
                   Kopiuj do schowka
                 </button>
               ) : (
-                <button onClick={() => applyImportText(transfer.text)}
+                <button type="button" onClick={() => applyImportText(transfer.text)}
                   className="rounded bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
                   Wczytaj projekt
                 </button>
