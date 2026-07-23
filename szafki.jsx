@@ -1,15 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
-const storage = {
-  async get(key) {
-    const value = window.localStorage.getItem(key);
-    return value === null ? null : { value };
-  },
-  async set(key, value) {
-    window.localStorage.setItem(key, value);
-  },
-};
-
 /* ============================================================
    SZAFKI — poziomy, kolumny, przegrody
    ============================================================ */
@@ -144,6 +134,9 @@ const defaultCab = {
   grainMatters: false,
   realColors: false,
   cutout: { on: false, corner: "backRight", w: 100, d: 100, fullHeight: true, levelIndex: 0, mask: true, maskType: "auto", maskFront: "over" },
+  obstacles: [],
+  // kazdy element: { on, w, d, h, side, fromSide, fromBack, fromBottom, fullHeight,
+  //   mask, maskType, maskFront, maskCorner, maskToShelf, maskH }
   obstacle: { on: false, w: 80, d: 80, h: 0, side: "right", fromSide: 0, fromBack: 0, fromBottom: 0, fullHeight: true, mask: false, maskType: "auto", maskFront: "over" },
   edgeOverrides: {},
 };
@@ -359,6 +352,48 @@ function computeGeo(cab, mat) {
   const insetExtra = cab.frontMode === "inset" ? tf : 0;
   const maxNL = [...VBOX.nl].reverse().find((v) => v + 3 + insetExtra <= carcassDepth) ?? null;
 
+  // przeszkody ograniczajace glebokosc szuflad: wyciecie narożnika i element kolizyjny
+  const backBlocks = [];
+  {
+    const cu = cab.cutout;
+    if (cu?.on) {
+      const onL = cu.corner === "backLeft" || cu.corner === "frontLeft";
+      const onB = cu.corner === "backLeft" || cu.corner === "backRight";
+      const cwv = Math.round(cu.w || 0), cdv = Math.round(cu.d || 0);
+      if (onB && cwv > 0 && cdv > 0) {
+        // zabudowa zabiera dodatkowo grubosc plyty czola
+        const maskT = cu.mask !== false ? t : 0;
+        backBlocks.push({ x0: onL ? 0 : W - cwv, x1: onL ? cwv : W, free: carcassDepth - cdv - maskT });
+      }
+    }
+    const preList = (Array.isArray(cab.obstacles) && cab.obstacles.length
+      ? cab.obstacles
+      : cab.obstacle?.on ? [cab.obstacle] : []).filter((o) => o && o.on !== false);
+    preList.forEach((obs) => {
+      const ow = Math.round(obs.w || 0), od = Math.round(obs.d || 0);
+      const fs = Math.round(obs.fromSide || 0), fb = Math.round(obs.fromBack || 0);
+      if (ow > 0 && od > 0) {
+        const x0 = obs.side === "left" ? fs : W - fs - ow;
+        const maskT = obs.mask ? t : 0;
+        backBlocks.push({ x0, x1: x0 + ow, free: carcassDepth - (fb + od) - maskT });
+      }
+    });
+  }
+  // najglebsze NL, jakie zmiesci sie w danym pasmie szerokosci
+  const maxNlFor = (x0, x1) => {
+    let blocked = false;
+    const lim = backBlocks.reduce((acc, b) => {
+      if (Math.min(b.x1, x1) - Math.max(b.x0, x0) > 0) {
+        blocked = true;
+        return Math.min(acc, b.free);
+      }
+      return acc;
+    }, carcassDepth);
+    // przy przeszkodzie wymagamy 4 mm luzu miedzy szuflada a zabudowa
+    const margin = blocked ? 4 : 3;
+    return [...VBOX.nl].reverse().find((v) => v + margin + insetExtra <= lim) ?? null;
+  };
+
   levels.forEach((lv) => {
     let lo, hi;
     if (cab.frontMode === "overlay") {
@@ -572,7 +607,8 @@ function computeGeo(cab, mat) {
       if (!ds.length) return;
 
       const LW = c.w;
-      const colNl = num(rawCol.nl) ?? maxNL; // domyslne dla kolumny
+      const colMaxNL = maxNlFor(sx0, sx1); // ile realnie wchodzi w tej kolumnie
+      const colNl = num(rawCol.nl) ?? colMaxNL; // domyslne dla kolumny
       c.nl = colNl;
       if (colNl === null)
         add("error", `${where}: korpus za płytki na najkrótszą szufladę (potrzeba ${250 + 3 + insetExtra} mm).`);
@@ -621,8 +657,8 @@ function computeGeo(cab, mat) {
           const need = nl + 3 + insetExtra;
           if (need > carcassDepth)
             add("error", `${where}, szuflada ${i + 1}: NL ${nl} wymaga korpusu ${need} mm, a jest ${fmt(carcassDepth)} mm.`);
-          else if (maxNL && nl < maxNL && num(d.nl) === null && num(rawCol.nl) === null)
-            add("info", `${where}, szuflada ${i + 1}: zmieści się głębsza NL ${maxNL}.`);
+          else if (colMaxNL && nl < colMaxNL)
+            add("info", `${where}, szuflada ${i + 1}: zmieści się głębsza NL ${colMaxNL}.|fixnl:${lv.i}:${j}:${i}:${colMaxNL}`);
         }
         const dr = {
           i,
@@ -767,7 +803,7 @@ function computeGeo(cab, mat) {
 
   /* --- formatki --- */
   let geoCut = null;
-  let geoOb = null;
+  const geoObs = [];
   const panels = [];
   const sameBoard = cab.frontSameAsBoard !== false;
   const sameShelf = cab.shelfSameAsBoard !== false;
@@ -787,20 +823,63 @@ function computeGeo(cab, mat) {
     if (e.b2) parts.push(n2);
     return parts.length > 1 ? parts.join(" + ") : parts[0];
   };
+  // --- skrocenia bokow i plecow przez narozniki (wyciecie + element na pelna wysokosc) ---
+  // zbieramy ile uciac z glebokosci lewego/prawego boku i ile z szerokosci plecow
+  const cornerCut = { sideLeftDepth: 0, sideRightDepth: 0, backLeftX: null, backRightX: null };
+  // edgeX = krawedz otworu/bryly od strony wnetrza; plecy maja siegac az tam (przykrywajac scianke)
+  const registerCorner = (onLeftSide, onBackWall, d, fullH, edgeX) => {
+    if (!fullH || !onBackWall) return;
+    if (onLeftSide) {
+      cornerCut.sideLeftDepth = Math.max(cornerCut.sideLeftDepth, d);
+      cornerCut.backLeftX = Math.max(cornerCut.backLeftX ?? 0, edgeX);
+    } else {
+      cornerCut.sideRightDepth = Math.max(cornerCut.sideRightDepth, d);
+      cornerCut.backRightX = Math.min(cornerCut.backRightX ?? W, edgeX);
+    }
+  };
+  {
+    const cu = cab.cutout;
+    if (cu?.on) {
+      const onL = cu.corner === "backLeft" || cu.corner === "frontLeft";
+      const onB = cu.corner === "backLeft" || cu.corner === "backRight";
+      const cwv = Math.round(cu.w || 0);
+      registerCorner(onL, onB, Math.round(cu.d || 0),
+        cu.fullHeight !== false || (cab.levels || []).length <= 1,
+        onL ? cwv : W - cwv);
+    }
+    const cornerList = (Array.isArray(cab.obstacles) && cab.obstacles.length
+      ? cab.obstacles
+      : cab.obstacle?.on ? [cab.obstacle] : []).filter((o) => o && o.on !== false);
+    cornerList.forEach((obs) => {
+      const atSide = Math.round(obs.fromSide || 0) === 0;
+      const atBack = Math.round(obs.fromBack || 0) === 0;
+      if (atSide && atBack) {
+        const ow = Math.round(obs.w || 0);
+        const onL = obs.side === "left";
+        registerCorner(onL, true, Math.round(obs.d || 0), obs.fullHeight !== false,
+          onL ? ow : W - ow);
+      }
+    });
+  }
+
+  const sideLDepth = carcassDepth - cornerCut.sideLeftDepth;
+  const sideRDepth = carcassDepth - cornerCut.sideRightDepth;
   const sideL = {
-    name: "Bok lewy", qty: 1, a: leftLen, b: carcassDepth, matKey: "board",
+    name: "Bok lewy", qty: 1, a: leftLen, b: sideLDepth, matKey: "board",
     edges: { a1: true, a2: rear, b1: topL === "between", b2: botL === "between" },
+    note: cornerCut.sideLeftDepth > 0 ? `skrócony o ${fmt(cornerCut.sideLeftDepth)} mm przy narożniku` : undefined,
   };
   const sideR = {
-    name: "Bok prawy", qty: 1, a: rightLen, b: carcassDepth, matKey: "board",
+    name: "Bok prawy", qty: 1, a: rightLen, b: sideRDepth, matKey: "board",
     edges: { a1: true, a2: rear, b1: topR === "between", b2: botR === "between" },
+    note: cornerCut.sideRightDepth > 0 ? `skrócony o ${fmt(cornerCut.sideRightDepth)} mm przy narożniku` : undefined,
   };
   const same = (x, y) =>
-    x.a === y.a && x.edges.b1 === y.edges.b1 && x.edges.b2 === y.edges.b2;
-  if (same(sideL, sideR)) P({ ...sideL, name: "Bok", qty: 2, note: noteOf(sideL.edges, "side") });
+    x.a === y.a && x.b === y.b && x.edges.b1 === y.edges.b1 && x.edges.b2 === y.edges.b2;
+  if (same(sideL, sideR)) P({ ...sideL, name: "Bok", qty: 2, note: sideL.note || noteOf(sideL.edges, "side") });
   else {
-    P({ ...sideL, note: noteOf(sideL.edges, "side") });
-    P({ ...sideR, note: noteOf(sideR.edges, "side") });
+    P({ ...sideL, note: sideL.note || noteOf(sideL.edges, "side") });
+    P({ ...sideR, note: sideR.note || noteOf(sideR.edges, "side") });
   }
 
   const horiz = (name, l, r, x0, x1) => ({
@@ -988,23 +1067,36 @@ function computeGeo(cab, mat) {
     });
   } else if (cab.back === "hdf" && grooved) {
     const grab = grDep - grPlay; // ile plecow wchodzi w kazdy frez
+    const gx0 = Math.max(interior.x0 - grab, cornerCut.backLeftX ?? (interior.x0 - grab));
+    const gx1 = Math.min(interior.x1 + grab, cornerCut.backRightX ?? (interior.x1 + grab));
     P({ name: "Plecy HDF we frezie", qty: 1,
-        a: innerW + 2 * grab, b: innerH + 2 * grab, matKey: "back",
+        a: gx1 - gx0, b: innerH + 2 * grab, matKey: "back",
         edges: { a1: false, a2: false, b1: false, b2: false },
         note: `wchodzi ${fmt(grab)} mm w każdy frez (${grDep} mm frezu minus ${grPlay} mm luzu)` });
-  } else if (cab.back === "hdf")
-    P({ name: "Plecy HDF", qty: 1, a: W - 2, b: H - 2, matKey: "back",
-        edges: { a1: false, a2: false, b1: false, b2: false }, note: "luz 1 mm z każdej strony" });
+  } else if (cab.back === "hdf") {
+    const x0 = (cornerCut.backLeftX ?? 0) + 1;
+    const x1 = (cornerCut.backRightX ?? W) - 1;
+    const cutInfo = (cornerCut.backLeftX || cornerCut.backRightX) ? ", docięte przy narożniku" : "";
+    P({ name: "Plecy HDF", qty: 1, a: x1 - x0, b: H - 2, matKey: "back",
+        edges: { a1: false, a2: false, b1: false, b2: false },
+        note: "luz 1 mm z każdej strony" + cutInfo });
+  }
   else if (cab.back === "board") {
     const backMat = cab.backPos === "outside"
       ? (cab.backBoardMat === "shelf" ? shelfMat : "board")
       : shelfMat; // wewnatrz zawsze z plyty polek (jak ustalono)
-    if (backPos === "outside")
-      P({ name: "Plecy z płyty (na zewnątrz)", qty: 1, a: W, b: H, matKey: backMat,
-          edges: { a1: false, a2: false, b1: false, b2: false }, note: "na całą tylną płaszczyznę korpusu" });
-    else
-      P({ name: "Plecy z płyty (wewnątrz)", qty: 1, a: innerW, b: innerH, matKey: backMat,
-          edges: { a1: false, a2: false, b1: false, b2: false }, note: "między bokami, wieńcem i dnem" });
+    const cutInfo = (cornerCut.backLeftX || cornerCut.backRightX) ? " (docięte przy narożniku)" : "";
+    if (backPos === "outside") {
+      const x0 = cornerCut.backLeftX ?? 0;
+      const x1 = cornerCut.backRightX ?? W;
+      P({ name: "Plecy z płyty (na zewnątrz)", qty: 1, a: x1 - x0, b: H, matKey: backMat,
+          edges: { a1: false, a2: false, b1: false, b2: false }, note: "na całą tylną płaszczyznę korpusu" + cutInfo });
+    } else {
+      const x0 = Math.max(interior.x0, cornerCut.backLeftX ?? interior.x0);
+      const x1 = Math.min(interior.x1, cornerCut.backRightX ?? interior.x1);
+      P({ name: "Plecy z płyty (wewnątrz)", qty: 1, a: x1 - x0, b: innerH, matKey: backMat,
+          edges: { a1: false, a2: false, b1: false, b2: false }, note: "między bokami, wieńcem i dnem" + cutInfo });
+    }
   }
 
   panels.forEach((p) => {
@@ -1022,8 +1114,12 @@ function computeGeo(cab, mat) {
   /* --- wspolna zabudowa L/U obszaru [bx0..bx1] x [bz0..bz1] na wysokosci [by0..by1] --- */
   // zwraca liczbe scianek dodanych + ostrzezenia; sciana czolowa "over" przed bokami, "between" miedzy
   function buildEnclosure(name, bx0, bx1, bz0, bz1, by0, by1, opts) {
-    const touchLeft = bx0 <= interior.x0 + 1;
-    const touchRight = bx1 >= interior.x1 - 1;
+    // swiatlo ponizej progu traktujemy jak dotkniecie sciany — nie ma sensu stawiac tam scianki
+    const near = opts.nearSide ?? 50;
+    const bndL = opts.boundL ?? interior.x0;
+    const bndR = opts.boundR ?? interior.x1;
+    const touchLeft = opts.touchLeft ?? bx0 - bndL < near;
+    const touchRight = opts.touchRight ?? bndR - bx1 < near;
     const touchBack = bz0 <= 1;
     const touchFront = bz1 >= carcassDepth - 1;
     const bh = by1 - by0;
@@ -1048,22 +1144,30 @@ function computeGeo(cab, mat) {
     };
 
     if (type === "L") {
-      // scianka pionowa (wzdluz glebokosci) + czolowa; jedna zachodzi na druga w narozniku
-      // "vertical" = pionowa widoczna (dochodzi do konca), czolowa dobija do jej boku (krotsza o t)
-      // "horizontal" = czolowa widoczna, pionowa krotsza o t
-      const vFull = carcassDepth - dIn > 0 ? carcassDepth - dIn : dIn;
-      const visible = opts.maskCorner === "horizontal" ? "horizontal" : "vertical";
-      if (visible === "vertical") {
-        addWall("ścianka boczna (widoczna)", bh, vFull);
-        addWall("ścianka czołowa", bh, Math.max(1, wIn - t));
-      } else {
-        addWall("ścianka boczna", bh, Math.max(1, vFull - t));
-        addWall("ścianka czołowa (widoczna)", bh, wIn);
+      // czolo dochodzi do lica boku, wiec na dalszym koncu odejmujemy jego grubosc
+      const farCut = opts.farSideThickness || 0;
+      // uklad A: boczna widoczna (dluzsza o t), czolo dobija do niej
+      const vA = dIn + t, hA = wIn - farCut;
+      // uklad B: czolo widoczne (siega za bok pionowej), boczna dobija
+      const vB = dIn, hB = wIn - farCut + t;
+      let visible = opts.maskCorner;
+      if (visible !== "vertical" && visible !== "horizontal") {
+        // auto: wybieramy uklad dajacy rowne (albo najblizsze) plyty
+        visible = Math.abs(vB - hB) <= Math.abs(vA - hA) ? "horizontal" : "vertical";
       }
+      if (visible === "vertical") {
+        addWall("ścianka boczna (wzdłuż głębokości, widoczna)", bh, vA);
+        addWall("ścianka czołowa (wzdłuż szerokości)", bh, hA);
+      } else {
+        addWall("ścianka boczna (wzdłuż głębokości)", bh, vB);
+        addWall("ścianka czołowa (wzdłuż szerokości, widoczna)", bh, hB);
+      }
+      return { count, type, touchBack, touchFront, touchLeft, touchRight, visible };
     } else {
       // U: dwie boczne wzdluz glebokosci + czolowa laczaca od strony wnetrza
-      addWall("ścianka boczna lewa", bh, dIn);
-      addWall("ścianka boczna prawa", bh, dIn);
+      const sideLen = front === "between" ? dIn + t : dIn;
+      addWall("ścianka boczna lewa", bh, sideLen);
+      addWall("ścianka boczna prawa", bh, sideLen);
       addWall(front === "between" ? "czoło (między bokami)" : "czoło (przed bokami)", bh, front === "between" ? wIn : wIn + 2 * t);
     }
     return { count, type, touchBack, touchFront, touchLeft, touchRight };
@@ -1077,7 +1181,9 @@ function computeGeo(cab, mat) {
     const onLeft = cut.corner === "backLeft" || cut.corner === "frontLeft";
     const onBack = cut.corner === "backLeft" || cut.corner === "backRight";
     if (cw <= 0 || cdp <= 0) add("error", "Wycięcie w narożniku ma zerowy wymiar.");
-    if (cw >= innerW) add("error", "Wycięcie szersze niż wnętrze szafki.");
+    if (cw >= W) add("error", "Wycięcie szersze niż szafka.");
+    else if (cw <= t)
+      add("warn", `Wycięcie ${fmt(cw)} mm nie wychodzi poza grubość boku — sprawdź, czy to celowe.`);
     if (cdp >= carcassDepth) add("error", "Wycięcie głębsze niż korpus.");
 
     // pionowy zakres: cala szafka albo jeden poziom
@@ -1088,8 +1194,9 @@ function computeGeo(cab, mat) {
     const cutH = cy1 - cy0;
 
     // obszar wneki: wspolrzedne x i z (glebokosc od tyłu)
-    const bx0 = onLeft ? interior.x0 : interior.x1 - cw;
-    const bx1 = onLeft ? interior.x0 + cw : interior.x1;
+    // szerokosc i glebokosc wyciecia mierzone od ZEWNETRZNEJ krawedzi szafki
+    const bx0 = onLeft ? 0 : W - cw;
+    const bx1 = onLeft ? cw : W;
     const bz0 = onBack ? 0 : carcassDepth - cdp;
     const bz1 = onBack ? cdp : carcassDepth;
 
@@ -1109,19 +1216,25 @@ function computeGeo(cab, mat) {
         });
         if (c.drawers && c.drawers.length) {
           // wneka od tyłu zabiera glebokosc; szuflada nie miesci sie, gdy jej NL siega wneki
-          const freeDepth = onBack ? carcassDepth - cdp : carcassDepth; // ile zostaje od lica gdy wneka z tyłu
+          const maskT = cut.mask !== false ? t : 0; // zabudowa zabiera dodatkowa plyte
+          const freeDepth = onBack ? carcassDepth - cdp - maskT : carcassDepth;
           c.drawers.forEach((dr) => {
             const drNl = dr.nl || 0;
-            const boxBack = carcassDepth - drNl; // od tyłu, gdzie zaczyna sie skrzynka
-            const collides = onBack ? boxBack < cdp : (carcassDepth - drNl) < 0;
-            if (collides) {
-              const maxNlFit = [600, 550, 500, 450, 400, 350, 300, 270, 250]
-                .find((v) => v + 3 <= freeDepth);
+            const gap = Math.round(freeDepth - drNl); // luz miedzy tylem szuflady a zabudowa
+            if (gap >= 4) return; // w porzadku
+            const maxNlFit = [600, 550, 500, 450, 400, 350, 300, 270, 250]
+              .find((v) => v + 4 <= freeDepth);
+            const act = maxNlFit ? `|fixnl:${lv.i}:${c.j}:${dr.i}:${maxNlFit}` : "";
+            const gdzie = `Poziom ${lv.i + 1}, kolumna ${c.j + 1}, szuflada ${dr.i + 1}`;
+            if (gap < 0) {
               const advice = maxNlFit
-                ? `zejdź z prowadnicą tej szuflady do NL ${maxNlFit}`
-                : `przed wycięciem zostaje ${fmt(freeDepth)} mm, a najkrótsza szuflada potrzebuje 253 mm — zabuduj tę kolumnę lub zmniejsz wycięcie`;
-              const act = maxNlFit ? `|fixnl:${lv.i}:${c.j}:${dr.i}:${maxNlFit}` : "";
-              add("error", `Poziom ${lv.i + 1}, kolumna ${c.j + 1}, szuflada ${dr.i + 1}: NL ${drNl} nie mieści się przy wycięciu — ${advice}.${act}`);
+                ? `zejdź z prowadnicą do NL ${maxNlFit}`
+                : `przed wycięciem zostaje ${fmt(freeDepth)} mm, a najkrótsza szuflada potrzebuje 254 mm — zabuduj tę kolumnę lub zmniejsz wycięcie`;
+              add("error", `${gdzie}: NL ${drNl} nie mieści się przy wycięciu — ${advice}.${act}`);
+            } else if (gap === 0) {
+              add("error", `${gdzie}: szuflada styka się z zabudową wycięcia — brak luzu, potrzeba minimum 4 mm.${act}`);
+            } else {
+              add("warn", `${gdzie}: tylko ${fmt(gap)} mm luzu do zabudowy wycięcia — zalecane minimum 4 mm.${act}`);
             }
           });
         }
@@ -1131,51 +1244,72 @@ function computeGeo(cab, mat) {
     // zabudowa
     if (cut.mask !== false) {
       const r = buildEnclosure("Zabudowa wycięcia", bx0, bx1, bz0, bz1, cy0, cy1,
-        { maskType: cut.maskType || "auto", maskFront: cut.maskFront, maskCorner: cut.maskCorner });
+        { maskType: "L", maskFront: cut.maskFront, maskCorner: cut.maskCorner, farSideThickness: t });
       geoCut.maskChosen = r.type;
+      geoCut.maskVisible = r.visible;
     } else {
       add("warn", "Wycięcie narożnika nie ma zabudowy — otwór zostanie odsłonięty. Włącz maskownicę, jeśli ma być zakryty.");
     }
   }
 
   /* --- swobodny element kolizyjny (bryla) --- */
-  const ob = cab.obstacle || { on: false };
-  if (ob.on) {
+  // lista elementow kolizyjnych (wstecznie: pojedynczy cab.obstacle)
+  const obsList = (Array.isArray(cab.obstacles) && cab.obstacles.length
+    ? cab.obstacles
+    : cab.obstacle?.on ? [cab.obstacle] : []).filter((o) => o && o.on !== false);
+  obsList.forEach((ob, obIdx) => {
+    const obName = obsList.length > 1 ? `Element ${obIdx + 1}` : "Element kolizyjny";
     const ow = Math.max(0, Math.round(ob.w || 0));
     const od = Math.max(0, Math.round(ob.d || 0));
     const fromSide = Math.round(ob.fromSide ?? ob.fromRight ?? 0); // odsuniecie od wybranego boku
     const fromB = Math.round(ob.fromBack || 0);  // odsuniecie od tylu
     const fromLeft = ob.side === "left";
-    // bryla pozycjonowana od wybranego boku do najblizszej krawedzi bryly
+    // pozycja mierzona od ZEWNETRZNEJ krawedzi szafki — tak samo jak wyciecie narożnika
     let ox0, ox1;
     if (fromLeft) {
-      ox0 = interior.x0 + fromSide;
+      ox0 = fromSide;
       ox1 = ox0 + ow;
     } else {
-      ox1 = interior.x1 - fromSide;
+      ox1 = W - fromSide;
       ox0 = ox1 - ow;
     }
-    // odleglosc od przeciwnego boku (do bliskiej krawedzi bryly)
-    const distLeft = Math.round(ox0 - interior.x0);
-    const distRight = Math.round(interior.x1 - ox1);
+    // odleglosci do zewnetrznych krawedzi szafki
+    const distLeft = Math.round(ox0);
+    const distRight = Math.round(W - ox1);
     const oz0 = fromB;
     const oz1 = fromB + od;
     const oFull = ob.fullHeight !== false;
     const oy0 = oFull ? interior.y0 : Math.round(ob.fromBottom || 0) + interior.y0;
     const oy1 = oFull ? interior.y1 : oy0 + Math.max(0, Math.round(ob.h || 0));
 
-    if (ow <= 0 || od <= 0) add("error", "Element kolizyjny ma zerowy wymiar.");
-    // kontrola: czy cala bryla miesci sie w swietle korpusu
-    if (ox0 < interior.x0)
-      add("warn", `Element kolizyjny wystaje poza lewą krawędź światła o ${fmt(interior.x0 - ox0)} mm — nie jest cały w szafce.`);
-    if (ox1 > interior.x1)
-      add("warn", `Element kolizyjny wystaje poza prawą krawędź światła o ${fmt(ox1 - interior.x1)} mm — nie jest cały w szafce.`);
+    if (ow <= 0 || od <= 0) add("error", `${obName} ma zerowy wymiar.`);
+    // kontrola: czy bryla miesci sie w obrysie szafki
+    if (ox0 < 0)
+      add("warn", `${obName} wystaje poza lewą krawędź szafki o ${fmt(-ox0)} mm.`);
+    if (ox1 > W)
+      add("warn", `${obName} wystaje poza prawą krawędź szafki o ${fmt(ox1 - W)} mm.`);
+    // bryla siegajaca w plyte boku wymaga jej przyciecia — informujemy
+    if (ox0 < interior.x0 && ox0 >= 0)
+      add("info", "Element sięga w płytę lewego boku — bok zostanie skrócony jak przy wycięciu narożnika.");
+    if (ox1 > interior.x1 && ox1 <= W)
+      add("info", "Element sięga w płytę prawego boku — bok zostanie skrócony jak przy wycięciu narożnika.");
     if (oz1 > carcassDepth)
-      add("warn", `Element kolizyjny wystaje przed lico korpusu o ${fmt(oz1 - carcassDepth)} mm.`);
+      add("warn", `${obName} wystaje przed lico korpusu o ${fmt(oz1 - carcassDepth)} mm.`);
     if (!oFull && oy1 > interior.y1)
-      add("warn", "Element kolizyjny wystaje ponad wnętrze szafki.");
+      add("warn", `${obName} wystaje ponad wnętrze szafki.`);
 
-    geoOb = { ox0, ox1, oz0, oz1, oy0, oy1, ow, od, oFull, distLeft, distRight };
+    // najblizsze ograniczenie z lewej i prawej: przegroda albo bok korpusu
+    const boundL = dividers
+      .filter((dv) => dv.x + t <= ox0 + 1)
+      .reduce((a, dv) => Math.max(a, dv.x + t), interior.x0);
+    const boundR = dividers
+      .filter((dv) => dv.x >= ox1 - 1)
+      .reduce((a, dv) => Math.min(a, dv.x), interior.x1);
+
+    const geoOb = { ox0, ox1, oz0, oz1, oy0, oy1, ow, od, oFull, distLeft, distRight,
+      touchLeft: ox0 - boundL < 50, touchRight: boundR - ox1 < 50, boundL, boundR,
+      touchBack: oz0 <= 1, touchFront: oz1 >= carcassDepth - 1,
+      mask: !!ob.mask, maskFront: ob.maskFront, name: obName, maskTop: null, shelfAbove: null };
 
     // kolizja z polkami i przegrodami
     const hitY = (y0, y1) => Math.min(y1, oy1) - Math.max(y0, oy0) > 0;
@@ -1192,33 +1326,63 @@ function computeGeo(cab, mat) {
         if (c.drawers && c.drawers.length) {
           c.drawers.forEach((dr) => {
             const drNl = dr.nl || 0;
-            // szuflada koliduje, jesli jej skrzynka (od lica na glebokosc NL) siega bryly
-            const boxBack = carcassDepth - drNl; // ile od tylu zaczyna sie skrzynka
-            if (hitY(dr.y, dr.y + dr.h) && oz0 < carcassDepth && boxBack < oz1) {
-              // wolne miejsce od lica do przedniej sciany bryly
-              const freeDepth = carcassDepth - oz1;
-              const maxNlFit = [600, 550, 500, 450, 400, 350, 300, 270, 250]
-                .find((v) => v + 3 <= freeDepth);
+            if (!hitY(dr.y, dr.y + dr.h)) return;
+            const freeDepth = carcassDepth - oz1 - (ob.mask ? t : 0);
+            const gap = Math.round(freeDepth - drNl);
+            if (gap >= 4) return;
+            const maxNlFit = [600, 550, 500, 450, 400, 350, 300, 270, 250]
+              .find((v) => v + 4 <= freeDepth);
+            const act = maxNlFit ? `|fixnl:${lv.i}:${c.j}:${dr.i}:${maxNlFit}` : "";
+            const gdzie = `Poziom ${lv.i + 1}, kolumna ${c.j + 1}, szuflada ${dr.i + 1}`;
+            const co = ob.mask ? "zabudowy elementu" : "elementu";
+            if (gap < 0) {
               const advice = maxNlFit
-                ? `zejdź z prowadnicą tej szuflady do NL ${maxNlFit}`
-                : `przed bryłą zostaje tylko ${fmt(freeDepth)} mm — najkrótsza szuflada NL 250 się nie zmieści, przesuń bryłę`;
-              const act = maxNlFit ? `|fixnl:${lv.i}:${c.j}:${dr.i}:${maxNlFit}` : "";
-              add("warn", `Poziom ${lv.i + 1}, kolumna ${c.j + 1}, szuflada ${dr.i + 1}: NL ${drNl} sięga elementu kolizyjnego — ${advice}.${act}`);
+                ? `zejdź z prowadnicą do NL ${maxNlFit}`
+                : `przed elementem zostaje ${fmt(freeDepth)} mm — najkrótsza szuflada się nie zmieści, przesuń bryłę`;
+              add("error", `${gdzie}: NL ${drNl} sięga ${co} — ${advice}.${act}`);
+            } else if (gap === 0) {
+              add("error", `${gdzie}: szuflada styka się z ${co} — brak luzu, potrzeba minimum 4 mm.${act}`);
+            } else {
+              add("warn", `${gdzie}: tylko ${fmt(gap)} mm luzu do ${co} — zalecane minimum 4 mm.${act}`);
             }
           });
         }
       });
     });
 
+    // polka nad elementem — zabudowa moze konczyc sie na niej
+    let shelfAbove = null;
+    levels.forEach((lv) => {
+      lv.cols.forEach((c) => {
+        if (Math.min(c.x1, ox1) - Math.max(c.x0, ox0) <= 0) return;
+        (c.shelves || []).forEach((sh) => {
+          if (sh.y >= oy1 - 1 && (shelfAbove === null || sh.y < shelfAbove)) shelfAbove = sh.y;
+        });
+      });
+    });
+    if (shelfAbove !== null && ob.mask && !ob.maskToShelf)
+      add("info", `${obName}: nad elementem jest półka na ${fmt(shelfAbove)} mm — zabudowa może kończyć się na niej zamiast biec przez całą wysokość.`);
+    // wysokosc zabudowy: do polki, wlasna albo do gory elementu
+    const maskTop = ob.mask && ob.maskToShelf && shelfAbove !== null
+      ? (num(ob.maskH) !== null ? oy0 + Math.round(ob.maskH) : shelfAbove)
+      : oy1;
+
     // zabudowa bryly
     if (ob.mask) {
-      const r = buildEnclosure("Zabudowa elementu", ox0, ox1, oz0, oz1, oy0, oy1,
-        { maskType: ob.maskType || "auto", maskFront: ob.maskFront, maskCorner: ob.maskCorner });
+      const r = buildEnclosure(`Zabudowa: ${obName}`, ox0, ox1, oz0, oz1, oy0, maskTop,
+        { maskType: ob.maskType || "auto", maskFront: ob.maskFront, maskCorner: ob.maskCorner,
+          boundL, boundR, touchLeft: geoOb.touchLeft, touchRight: geoOb.touchRight,
+          farSideThickness: (ox0 <= interior.x0 + 1 || ox1 >= interior.x1 - 1) ? t : 0 });
       geoOb.maskChosen = r.type;
+      geoOb.maskVisible = r.visible;
+      geoOb.maskTop = maskTop;
     } else if (ow > 0 && od > 0) {
-      add("warn", "Element kolizyjny nie ma zabudowy — nie jest zakryty ani odgrodzony od wnętrza. Włącz zabudowę, jeśli ma być schowany.");
+      add("warn", `${obName} nie ma zabudowy — nie jest zakryty ani odgrodzony od wnętrza. Włącz zabudowę, jeśli ma być schowany.`);
     }
-  }
+    geoOb.shelfAbove = shelfAbove;
+    geoObs.push(geoOb);
+  });
+  const geoOb = geoObs[0] || null;
 
   /* --- produkty do zamowienia --- */
   const hardware = [];
@@ -1274,8 +1438,8 @@ function computeGeo(cab, mat) {
     hardware,
     t, tf, tb, carcassDepth, hasBack, interior, innerW, innerH,
     shelfDepth, dividerDepth, backIntrusion, frontCut, levels, sepShelves, dividers, doors, panels, msgs, maxNL,
-    plinthInBody, plinthH, bottomY, pMode, grooved, grOff, grDep, grPlay, geoCut, geoOb,
-    backPos, backIsBoard,
+    plinthInBody, plinthH, bottomY, pMode, grooved, grOff, grDep, grPlay, geoCut, geoOb, geoObs,
+    backPos, backIsBoard, cornerCut,
     topL, topR, botL, botR, leftLen, rightLen, leftY0, rightY0,
     topX0, topX1, botX0, botX1, divOv,
   };
@@ -1676,6 +1840,43 @@ function FrontView({ cab, geo, mat, open, showDims, showGaps, showLabels }) {
         </>
       )}
 
+      {/* swiatla miedzy polkami — w widoku otwartym, przy lewej krawedzi kolumny */}
+      {open && showDims &&
+        geo.levels.flatMap((lv) =>
+          lv.cols
+            .filter((c) => c.kind !== "drawers" && c.kind !== "blenda")
+            .flatMap((c) =>
+              (c.openings || [])
+                .filter((op) => op.h > 30)
+                .map((op) => (
+                  <DimV key={`op${lv.i}-${c.j}-${op.k}`}
+                    y1={fy(op.to)} y2={fy(op.from)} x={c.x0 + 46}
+                    label={`${fmt(op.h)}`} left={false} c={DIMC} />
+                ))
+            )
+        )}
+
+      {/* wysokosc uzytkowa szuflad: od gory dna (36 mm nad dolem frontu) do dolu frontu wyzej */}
+      {open && showDims &&
+        geo.levels.flatMap((lv) =>
+          lv.cols
+            .filter((c) => c.kind === "drawers" && (c.drawers || []).length)
+            .flatMap((c) => {
+              const ds = [...c.drawers].sort((a, b) => a.y - b.y);
+              return ds.map((dr, i) => {
+                const bottom = dr.y + 36; // gora dna szuflady
+                const top = i + 1 < ds.length ? ds[i + 1].y : lv.y1;
+                const val = Math.round(top - bottom);
+                if (val < 30) return null;
+                return (
+                  <DimV key={`du${lv.i}-${c.j}-${i}`}
+                    y1={fy(top)} y2={fy(bottom)} x={c.x0 + 46}
+                    label={`${fmt(val)} od dna`} left={false} c={DIMC} />
+                );
+              });
+            })
+        )}
+
       {showLabels &&
         geo.levels.flatMap((lv) =>
           lv.cols.map((c) => {
@@ -1733,6 +1934,18 @@ function RearView({ cab, geo, mat, showDims }) {
     bx = 1; by = 1; bw = W - 2; bh = H - 2;
     label = "HDF przybijane, luz 1 mm z każdej strony";
   }
+  // przyciecie plecow do granic narożnika
+  {
+    const limL = geo.cornerCut?.backLeftX;
+    const limR = geo.cornerCut?.backRightX;
+    if ((limL != null || limR != null) && bw > 0) {
+      const x0 = Math.max(bx, limL ?? bx);
+      const x1 = Math.min(bx + bw, limR ?? bx + bw);
+      bx = x0;
+      bw = Math.max(0, x1 - x0);
+      label += ", docięte przy narożniku";
+    }
+  }
 
   return (
     <svg viewBox={vb} className="w-full h-auto" style={{ maxHeight: 540 }}>
@@ -1780,16 +1993,17 @@ function RearView({ cab, geo, mat, showDims }) {
       {/* wyciecie w narozniku — widziane od tylu */}
       {geo.geoCut && (() => {
         const gc = geo.geoCut;
-        // od tylu lewy bok jest po prawej; wneka przy boku onLeft
-        const xw = gc.onLeft ? mx(geo.interior.x0, gc.cw) : geo.interior.x0;
+        // od tylu obraz jest lustrzany: mx(x, w)
+        const xw = mx(gc.bx0, gc.bx1 - gc.bx0);
+        // scianka pionowa stoi na zewnatrz otworu, po stronie wnetrza
+        const wallX = gc.onLeft ? gc.bx1 : gc.bx0 - t;
         return (
           <>
-            <rect x={xw} y={fy(gc.cy1)} width={gc.cw} height={gc.cutH}
+            <rect x={xw} y={fy(gc.cy1)} width={gc.bx1 - gc.bx0} height={gc.cutH}
               fill={ERRC} opacity="0.14" stroke={ERRC} strokeWidth="1.5" strokeDasharray="6 4" />
-            {/* maskownica pionowa — scianka odcinajaca wneke */}
-            <rect x={gc.onLeft ? xw + gc.cw - t : xw} y={fy(gc.cy1)} width={t} height={gc.cutH}
+            <rect x={mx(wallX, t)} y={fy(gc.cy1)} width={t} height={gc.cutH}
               fill={mat.shelf?.color || bf} stroke={INK} strokeWidth="2" opacity="0.9" />
-            <text x={xw + gc.cw / 2} y={fy((gc.cy0 + gc.cy1) / 2)} textAnchor="middle"
+            <text x={xw + (gc.bx1 - gc.bx0) / 2} y={fy((gc.cy0 + gc.cy1) / 2)} textAnchor="middle"
               fontSize="18" fill={ERRC} fontFamily="ui-monospace, monospace">
               wycięcie {fmt(gc.cw)}×{fmt(gc.cdp)}
             </text>
@@ -1829,7 +2043,7 @@ function RearView({ cab, geo, mat, showDims }) {
   );
 }
 
-function TopView({ cab, geo, mat, showDims }) {
+function TopView({ cab, geo, mat, showDims, showShelves }) {
   const { W, D } = cab;
   const pad = 160;
   // patrzymy z gory: X = szerokosc, Y (w dol na ekranie) = glebokosc, przod u dolu
@@ -1843,12 +2057,34 @@ function TopView({ cab, geo, mat, showDims }) {
     <svg viewBox={vb} className="w-full h-auto" style={{ maxHeight: 540 }}>
       {/* obrys korpusu z gory */}
       <rect x="0" y="0" width={W} height={cd} fill="#fafaf9" stroke={LINE} strokeWidth="1.5" />
-      {/* boki */}
-      <rect x="0" y="0" width={t} height={cd} fill={bf} stroke={INK} strokeWidth="2" />
-      <rect x={W - t} y="0" width={t} height={cd} fill={bf} stroke={INK} strokeWidth="2" />
+      {/* boki — skrocone przy narozniku z wycieciem/elementem */}
+      <rect x="0" y={geo.cornerCut?.sideLeftDepth || 0} width={t}
+        height={cd - (geo.cornerCut?.sideLeftDepth || 0)} fill={bf} stroke={INK} strokeWidth="2" />
+      <rect x={W - t} y={geo.cornerCut?.sideRightDepth || 0} width={t}
+        height={cd - (geo.cornerCut?.sideRightDepth || 0)} fill={bf} stroke={INK} strokeWidth="2" />
       {/* wieniec widoczny z gory jako plyta na calej glebokosci */}
       <rect x={geo.topX0} y="0" width={geo.topX1 - geo.topX0} height={cd}
         fill={bf} stroke={INK} strokeWidth="1" opacity="0.25" />
+
+      {/* polki widziane z gory — obrys glebokosci polki w kolumnach, ktore je maja */}
+      {showShelves &&
+        (geo.levels[0]?.cols || []).map((c) => {
+          if (c.kind === "drawers" || c.kind === "blenda") return null;
+          const n = (c.shelves || []).length;
+          if (!n) return null;
+          return (
+            <g key={"sh" + c.j}>
+              <rect x={c.x0} y={geo.backIntrusion} width={c.w} height={geo.shelfDepth}
+                fill={mat.shelf?.color || mat.board.color} fillOpacity="0.35"
+                stroke={INK} strokeWidth="1.5" strokeDasharray="9 6" />
+              <text x={(c.x0 + c.x1) / 2} y={geo.backIntrusion + geo.shelfDepth - 14}
+                textAnchor="middle" fontSize="17" fill={INK} opacity="0.75"
+                fontFamily="ui-monospace, monospace">
+                {n} {n === 1 ? "półka" : "półki"} {fmt(c.w)}×{fmt(geo.shelfDepth)}
+              </text>
+            </g>
+          );
+        })}
 
       {/* przegrody pionowe */}
       {geo.dividers.map((d, i) => (
@@ -1907,8 +2143,12 @@ function TopView({ cab, geo, mat, showDims }) {
         // z gory: y=0 to tyl. Plecy wewnatrz siedza tuz przy tyle, na zewnatrz za korpusem
         const outside = geo.backIsBoard && geo.backPos === "outside";
         const py = geo.grooved ? geo.grOff : outside ? -geo.tb : 0;
-        const px = geo.grooved || (geo.backIsBoard && geo.backPos === "inside") ? geo.interior.x0 : 1;
-        const pw = geo.grooved || (geo.backIsBoard && geo.backPos === "inside") ? geo.innerW : W - 2;
+        const inside = geo.grooved || (geo.backIsBoard && geo.backPos === "inside");
+        const base0 = inside ? geo.interior.x0 : 1;
+        const base1 = inside ? geo.interior.x1 : W - 1;
+        const px = Math.max(base0, geo.cornerCut?.backLeftX ?? base0);
+        const px1 = Math.min(base1, geo.cornerCut?.backRightX ?? base1);
+        const pw = Math.max(0, px1 - px);
         return (
           <rect x={px} y={py} width={pw} height={geo.tb}
             fill={bcol} stroke={INK} strokeWidth="2" />
@@ -1924,24 +2164,26 @@ function TopView({ cab, geo, mat, showDims }) {
         const ry = gc.bz0;
         const rw = gc.bx1 - gc.bx0;
         const rh = gc.bz1 - gc.bz0;
-        // wewnetrzne krawedzie wneki (od strony wnetrza szafki) — maskownica staje POZA wneka
-        const innerX = gc.onLeft ? gc.bx1 : gc.bx0; // pionowa scianka na tej krawedzi
-        const innerZ = gc.onBack ? gc.bz1 : gc.bz0; // pozioma scianka (czolo)
         return (
           <>
             <rect x={rx} y={ry} width={rw} height={rh}
               fill={ERRC} opacity="0.15" stroke={ERRC} strokeWidth="1.5" strokeDasharray="6 4" />
             {cab.cutout?.mask !== false && (() => {
-              const vVisible = cab.cutout?.maskCorner !== "horizontal";
-              // pionowa scianka (po stronie wnetrza, poza wneka)
-              const vx = gc.onLeft ? innerX : innerX - t;
-              // pozioma scianka (czolo, po stronie wnetrza)
-              const hy = gc.onBack ? innerZ : innerZ - t;
-              // zachodzenie: widoczna dochodzi do konca, druga dobija do jej boku
-              const vy = vVisible ? ry : (gc.onBack ? ry + t : ry);
-              const vh = vVisible ? rh : rh - t;
-              const hx = vVisible ? (gc.onLeft ? rx + t : rx) : rx;
-              const hw = vVisible ? rw - t : rw;
+              const vVisible = gc.maskVisible === "vertical";
+              // scianki NA ZEWNATRZ otworu; czolo dochodzi do lica boku
+              const sideFace = gc.onLeft ? rx + t : rx + rw - t; // lico boku od wnetrza
+              const vx = gc.onLeft ? rx + rw : rx - t;
+              const hy = gc.onBack ? ry + rh : ry - t;
+              const vy = vVisible ? (gc.onBack ? ry : ry - t) : ry;
+              const vh = vVisible ? rh + t : rh;
+              const hx0 = gc.onLeft
+                ? sideFace
+                : (vVisible ? rx : rx - t);
+              const hx1 = gc.onLeft
+                ? (vVisible ? rx + rw : rx + rw + t)
+                : sideFace;
+              const hx = Math.min(hx0, hx1);
+              const hw = Math.abs(hx1 - hx0);
               return (
                 <>
                   <rect x={vx} y={vy} width={t} height={vh}
@@ -1953,61 +2195,180 @@ function TopView({ cab, geo, mat, showDims }) {
             })()}
             {showDims && (
               <>
-                {/* szerokosc tuz pod obszarem wneki */}
-                <DimH x1={rx} x2={rx + rw} y={ry + rh + 22} label={`${fmt(gc.cw)}`} above={false} c={ERRC} />
-                {/* glebokosc tuz przy krawedzi wneki od strony boku */}
-                <DimV y1={ry} y2={ry + rh} x={gc.onLeft ? rx - 18 : rx + rw + 18}
+                {/* szerokosc na zewnatrz otworu: przy tylnej scianie gdy otwor z tyłu, inaczej przy licu */}
+                <DimH x1={rx} x2={rx + rw}
+                  y={gc.onBack ? ry - 22 : ry + rh + 22}
+                  label={`${fmt(gc.cw)}`} above={gc.onBack} c={ERRC} />
+                {/* glebokosc na zewnatrz otworu: po stronie boku szafki */}
+                <DimV y1={ry} y2={ry + rh}
+                  x={gc.onLeft ? rx - 22 : rx + rw + 22}
                   label={`${fmt(gc.cdp)}`} left={gc.onLeft} c={ERRC} />
+                {/* wolna glebokosc od czola zabudowy do lica */}
+                {(() => {
+                  const mt = cab.cutout?.mask !== false ? t : 0;
+                  const zEnd = gc.bz1 + mt;
+                  const free = Math.round(cd - zEnd);
+                  if (free < 20) return null;
+                  return (
+                    <DimV y1={zEnd} y2={cd} x={(gc.bx0 + gc.bx1) / 2}
+                      label={`${fmt(free)}`} left={!gc.onLeft} c={LINE} />
+                  );
+                })()}
+
               </>
             )}
           </>
         );
       })()}
 
-      {geo.geoOb && (() => {
-        const o = geo.geoOb;
+      {(geo.geoObs || []).map((o, obIx) => (() => {
         return (
-          <>
+          <g key={"ob" + obIx}>
             <rect x={o.ox0} y={o.oz0} width={o.ow} height={o.od}
               fill="#7c3aed" opacity="0.28" stroke="#6d28d9" strokeWidth="1.5" strokeDasharray="5 4" />
+            {o.mask && o.maskChosen && (() => {
+              const smat = mat.shelf?.color || mat.board.color;
+              const rx = o.ox0, ry = o.oz0, rw = o.ow, rh = o.od;
+              const gb = o;
+              const needL = !gb.touchLeft, needR = !gb.touchRight;
+              const needBack = !gb.touchBack, needFront = !gb.touchFront;
+              const vVisible = gb.maskVisible === "vertical";
+              const isU = gb.maskChosen === "U";
+              const frontBetween = o.maskFront === "between";
+              // czolo konczy sie na licu boku, gdy bryla dotyka boku
+              const hx0 = gb.touchLeft ? (gb.boundL ?? t)
+                : isU ? (frontBetween ? rx : rx - t)
+                : (needL && !vVisible ? rx - t : rx);
+              const hx1 = gb.touchRight ? (gb.boundR ?? W - t)
+                : isU ? (frontBetween ? rx + rw : rx + rw + t)
+                : (needR && !vVisible ? rx + rw + t : rx + rw);
+              // przy czole miedzy bokami scianki wychodza przed nie o jego grubosc
+              const eB = needBack && (isU ? frontBetween : vVisible) ? t : 0;
+              const eF = needFront && (isU ? frontBetween : vVisible) ? t : 0;
+              const walls = [];
+              if (needL) walls.push({ x: rx - t, y: ry - eB, w: t, h: rh + eB + eF });
+              if (needR) walls.push({ x: rx + rw, y: ry - eB, w: t, h: rh + eB + eF });
+              if (needBack) walls.push({ x: hx0, y: ry - t, w: hx1 - hx0, h: t });
+              if (needFront) walls.push({ x: hx0, y: ry + rh, w: hx1 - hx0, h: t });
+              return walls.map((w, i) => (
+                <rect key={"ow" + i} x={w.x} y={w.y} width={w.w} height={w.h}
+                  fill={smat} stroke={INK} strokeWidth="2" />
+              ));
+            })()}
             <text x={o.ox0 + o.ow / 2} y={o.oz0 + o.od / 2 + 6} textAnchor="middle"
               fontSize="18" fill="#6d28d9" fontFamily="ui-monospace, monospace">
               {fmt(o.ow)}×{fmt(o.od)}
             </text>
             {showDims && (() => {
-              // znajdz kolumne dolnego poziomu, w ktorej lezy bryla
+              // bryla w narozniku wchodzi w plyte boku — wtedy mierzymy od krawedzi szafki
               const cols = geo.levels[0]?.cols || [];
               const host = cols.find((c) => o.ox0 >= c.x0 - 1 && o.ox1 <= c.x1 + 1);
-              const colX0 = host ? host.x0 : geo.t;
-              const colX1 = host ? host.x1 : W - geo.t;
+              const colX0 = host ? host.x0 : 0;
+              const colX1 = host ? host.x1 : W;
               const dL = Math.round(o.ox0 - colX0);
               const dR = Math.round(colX1 - o.ox1);
               return (
                 <>
                   {/* glebokosc od tylu do bryly */}
-                  {o.oz0 > 0 && (
+                  {o.oz0 > 0 && !o.mask && (
                     <DimV y1={0} y2={o.oz0} x={o.ox0 - 18}
                       label={`${fmt(o.oz0)}`} c="#6d28d9" />
                   )}
-                  {/* glebokosc od przodu (lica) do bryly */}
-                  {cd - o.oz1 > 0 && (
+                  {/* glebokosc od przodu (lica) do bryly — tylko gdy nie ma zabudowy,
+                      bo przy zabudowie mierzymy przestrzen od jej czola */}
+                  {cd - o.oz1 > 0 && !o.mask && (
                     <DimV y1={o.oz1} y2={cd} x={o.ox1 + 18}
                       label={`${fmt(cd - o.oz1)}`} left={false} c="#6d28d9" />
                   )}
                   {/* odleglosci w obrebie kolumny, tuz pod bryla */}
-                  {dL > 1 && (
-                    <DimH x1={colX0} x2={o.ox0} y={o.oz1 + 22}
+                  {dL > 1 && !o.mask && (
+                    <DimH x1={colX0} x2={o.ox0} y={o.oz1 + 46}
                       label={`${fmt(dL)}`} above={false} c="#6d28d9" />
                   )}
-                  {dR > 1 && (
-                    <DimH x1={o.ox1} x2={colX1} y={o.oz1 + 22}
+                  {dR > 1 && !o.mask && (
+                    <DimH x1={o.ox1} x2={colX1} y={o.oz1 + 46}
                       label={`${fmt(dR)}`} above={false} c="#6d28d9" />
                   )}
+                  {/* wolna przestrzen po zabudowie — tylko w kolumnach z polkami */}
+                  {host && host.kind !== "drawers" && o.mask && (() => {
+                    const gb = o;
+                    const wallL = gb.touchLeft ? host.x0 : o.ox0 - geo.t;
+                    const wallR = gb.touchRight ? host.x1 : o.ox1 + geo.t;
+                    const myEnd = o.oz1 + (o.mask ? geo.t : 0);
+                    const frontFree = Math.round(cd - myEnd);
+                    return (
+                      <>
+                        {frontFree > 1 && (
+                          <DimV y1={myEnd} y2={cd} x={(o.ox0 + o.ox1) / 2}
+                            label={`${fmt(frontFree)}`}
+                            left={(o.ox0 + o.ox1) / 2 > W / 2} c={LINE} />
+                        )}
+                      </>
+                    );
+                  })()}
                 </>
               );
             })()}
-          </>
+          </g>
         );
+      })())}
+
+      {/* swiatla miedzy przeszkodami — liczone raz, na kazdym pasmie glebokosci */}
+      {showDims && (() => {
+        const cols = geo.levels[0]?.cols || [];
+        const blockers = [];
+        if (geo.geoCut) {
+          const gc = geo.geoCut;
+          const mt = cab.cutout?.mask !== false ? t : 0;
+          blockers.push({
+            l: gc.onLeft ? gc.bx0 : gc.bx0 - mt,
+            r: gc.onLeft ? gc.bx1 + mt : gc.bx1,
+            end: gc.bz1 + mt,
+          });
+        }
+        (geo.geoObs || []).forEach((q) => {
+          const mt = q.mask ? t : 0;
+          blockers.push({
+            l: q.ox0 - (q.touchLeft ? 0 : mt),
+            r: q.ox1 + (q.touchRight ? 0 : mt),
+            end: q.oz1 + mt,
+          });
+        });
+        if (!blockers.length) return null;
+        const edges = [0, ...new Set(blockers.map((b) => Math.round(b.end)))].sort((a, b) => a - b);
+        const bands = edges.map((z, i) => [z, i + 1 < edges.length ? edges[i + 1] : cd]);
+        const drawn = new Set();
+        const out = [];
+        bands.forEach(([za, zb]) => {
+          if (zb - za < 12) return;
+          const act = blockers.filter((b) => b.end > za + 1);
+          cols.forEach((col) => {
+            if (col.kind === "drawers") return;
+            const inCol = act
+              .filter((b) => b.r > col.x0 + 1 && b.l < col.x1 - 1)
+              .sort((a, b) => a.l - b.l);
+            if (!inCol.length) return;
+            let cur = col.x0;
+            const segs = [];
+            inCol.forEach((b) => {
+              if (b.l - cur > 1) segs.push([cur, b.l]);
+              cur = Math.max(cur, b.r);
+            });
+            if (col.x1 - cur > 1) segs.push([cur, col.x1]);
+            segs.forEach(([sa, sb]) => {
+              const val = Math.round(sb - sa);
+              if (val < 20) return;
+              const key = `${col.j}|${Math.round(sa)}|${Math.round(sb)}`;
+              if (drawn.has(key)) return;
+              drawn.add(key);
+              out.push(
+                <DimH key={"lw" + key} x1={sa} x2={sb} y={za + 16}
+                  label={`${fmt(val)}`} above={false} c={LINE} />
+              );
+            });
+          });
+        });
+        return out;
       })()}
 
       {showDims && (
@@ -2037,7 +2398,8 @@ function TopView({ cab, geo, mat, showDims }) {
   );
 }
 
-function SideView({ cab, geo, mat, showDims }) {
+function SideView({ cab, geo, mat, showDims, which }) {
+  const sideRight = which === "right";
   const { H, D } = cab;
   const pad = 160;
   const rightExtra = cab.frontMode === "overlay" ? geo.tf : 0;
@@ -2062,7 +2424,13 @@ function SideView({ cab, geo, mat, showDims }) {
   return (
     <svg viewBox={vb} className="w-full h-auto" style={{ maxHeight: 540 }}>
       <rect x="0" y="0" width={D} height={H} fill="#fafaf9" stroke={LINE} strokeWidth="1.5" strokeDasharray="8 8" />
-      <rect x={xC} y="0" width={cd} height={H} fill={bf} stroke={INK} strokeWidth="2" opacity="0.35" />
+      {(() => {
+        const cut = (sideRight ? geo.cornerCut?.sideRightDepth : geo.cornerCut?.sideLeftDepth) || 0;
+        return (
+          <rect x={xC + cut} y="0" width={cd - cut} height={H}
+            fill={bf} stroke={INK} strokeWidth="2" opacity="0.35" />
+        );
+      })()}
       <rect x={xC} y="0" width={cd} height={geo.t} fill={bf} stroke={INK} strokeWidth="2" />
       <rect x={xC} y={fy(geo.bottomY + geo.t)} width={cd} height={geo.t} fill={bf} stroke={INK} strokeWidth="2" />
 
@@ -2135,7 +2503,7 @@ function SideView({ cab, geo, mat, showDims }) {
           <DimV y1={0} y2={H} x={-50} label={`${fmt(H)}`} />
         </>
       )}
-      {geo.geoCut && geo.geoCut.onBack && (
+      {geo.geoCut && geo.geoCut.onBack && (geo.geoCut.onLeft !== sideRight) && (
         <>
           {/* obszar wyciecia od tylu (tyl po lewej, x=xC) */}
           <rect x={xC} y={fy(geo.geoCut.cy1)} width={geo.geoCut.cdp} height={geo.geoCut.cutH}
@@ -2145,6 +2513,25 @@ function SideView({ cab, geo, mat, showDims }) {
             fill={mat.shelf?.color || bf} stroke={INK} strokeWidth="2" opacity="0.9" />
         </>
       )}
+      {/* elementy kolizyjne — widoczne w przekroju boku */}
+      {(geo.geoObs || []).map((o, oi) => {
+        const near = sideRight ? o.touchRight : o.touchLeft; // przy pokazywanym boku
+        return (
+          <g key={"sob" + oi} opacity={near ? 1 : 0.45}>
+            <rect x={xC + o.oz0} y={fy(o.oy1)} width={o.od} height={o.oy1 - o.oy0}
+              fill="#7c3aed" opacity="0.3" stroke="#6d28d9" strokeWidth="1.5" strokeDasharray="5 4" />
+            {o.mask && !o.touchFront && (
+              <rect x={xC + o.oz1} y={fy(o.maskTop ?? o.oy1)} width={geo.t} height={(o.maskTop ?? o.oy1) - o.oy0}
+                fill={mat.shelf?.color || bf} stroke={INK} strokeWidth="2" />
+            )}
+            {o.mask && !o.touchBack && (
+              <rect x={xC + o.oz0 - geo.t} y={fy(o.maskTop ?? o.oy1)} width={geo.t} height={(o.maskTop ?? o.oy1) - o.oy0}
+                fill={mat.shelf?.color || bf} stroke={INK} strokeWidth="2" />
+            )}
+          </g>
+        );
+      })}
+
       {geo.geoCut && !geo.geoCut.onBack && (
         <>
           <rect x={D - geo.geoCut.cdp} y={fy(geo.geoCut.cy1)} width={geo.geoCut.cdp} height={geo.geoCut.cutH}
@@ -2152,7 +2539,7 @@ function SideView({ cab, geo, mat, showDims }) {
         </>
       )}
       <text x={D / 2} y={H + 125} textAnchor="middle" fontSize="22" fill={LINE}
-        fontFamily="ui-monospace, monospace">tył po lewej, przód po prawej</text>
+        fontFamily="ui-monospace, monospace">{sideRight ? "prawy bok" : "lewy bok"} — tył po lewej, przód po prawej</text>
     </svg>
   );
 }
@@ -2191,8 +2578,11 @@ function Scene3D({ cab, geo, mat, open, yaw, pitch, angle }) {
     solids.push({ v, color, alpha: alpha ?? 1, bold: !!bold });
   };
 
-  box(0, geo.leftY0, 0, t, geo.leftY0 + geo.leftLen, cd, bf);
-  box(W - t, geo.rightY0, 0, W, geo.rightY0 + geo.rightLen, cd, bf);
+  // boki skrocone przy narozniku (w 3D z=cd to tyl, wiec ucinamy od strony cd)
+  const cutSL = geo.cornerCut?.sideLeftDepth || 0;
+  const cutSR = geo.cornerCut?.sideRightDepth || 0;
+  box(0, geo.leftY0, 0, t, geo.leftY0 + geo.leftLen, cd - cutSL, bf);
+  box(W - t, geo.rightY0, 0, W, geo.rightY0 + geo.rightLen, cd - cutSR, bf);
   box(geo.botX0, geo.bottomY, 0, geo.botX1, geo.bottomY + t, cd, bf);
   box(geo.topX0, H - t, 0, geo.topX1, H, cd, bf);
 
@@ -2203,7 +2593,9 @@ function Scene3D({ cab, geo, mat, open, yaw, pitch, angle }) {
     const bx1 = geo.grooved ? geo.interior.x1 + grab : W - 1;
     const by0 = geo.grooved ? geo.interior.y0 - grab : 1;
     const by1 = geo.grooved ? geo.interior.y1 + grab : H - 1;
-    box(bx0, by0, bz, bx1, by1, bz + geo.tb, mat.back.color);
+    const px0 = Math.max(bx0, geo.cornerCut?.backLeftX ?? bx0);
+    const px1 = Math.min(bx1, geo.cornerCut?.backRightX ?? bx1);
+    box(px0, by0, bz, px1, by1, bz + geo.tb, mat.back.color);
   }
 
   geo.sepShelves.forEach((sh) =>
@@ -2244,21 +2636,41 @@ function Scene3D({ cab, geo, mat, open, yaw, pitch, angle }) {
       .forEach(([lx, lz]) => box(lx, -lh, lz, lx + 40, 0, lz + 40, "#3f3f46"));
   }
 
-  if (geo.geoOb) {
-    const o = geo.geoOb;
+  (geo.geoObs || []).forEach((o) => {
     // w 3D z=cd to tyl, a geometria bryly ma tyl przy oz=0 — odwracamy
     box(o.ox0, o.oy0, cd - o.oz1, o.ox1, o.oy1, cd - o.oz0, "#7c3aed", null, 0.45);
-  }
+  });
   if (geo.geoCut && cab.cutout?.mask !== false) {
-    // maskownica L widoczna w 3D
     const gc = geo.geoCut;
     const smat = mat.shelf?.color || bf;
-    if (gc.onBack) {
-      box(gc.onLeft ? geo.interior.x0 + gc.cw - t : geo.interior.x1 - gc.cw,
-        gc.cy0, gc.cdp - t, gc.onLeft ? geo.interior.x0 + gc.cw : geo.interior.x1 - gc.cw + t,
-        gc.cy1, gc.cdp, smat);
-    }
+    // w 3D z=cd to TYL, geometria wneki ma tyl przy z=0 -> odwracamy: z3d = cd - z
+    const zf = (z) => cd - z;
+    const rx = gc.bx0, rw = gc.bx1 - gc.bx0;
+    const ry = gc.bz0, rh = gc.bz1 - gc.bz0;
+    const vVisible = gc.maskVisible === "vertical";
+    const sideFace = gc.onLeft ? rx + t : rx + rw - t; // lico boku od wnetrza
+    const vx0 = gc.onLeft ? rx + rw : rx - t;
+    const vz0 = vVisible ? (gc.onBack ? ry : ry - t) : ry;
+    const vz1 = vz0 + (vVisible ? rh + t : rh);
+    box(vx0, gc.cy0, zf(vz1), vx0 + t, gc.cy1, zf(vz0), smat);
+    // czolo — dochodzi do lica boku
+    const hz0 = gc.onBack ? ry + rh : ry - t;
+    const a0 = gc.onLeft ? sideFace : (vVisible ? rx : rx - t);
+    const a1 = gc.onLeft ? (vVisible ? rx + rw : rx + rw + t) : sideFace;
+    box(Math.min(a0, a1), gc.cy0, zf(hz0 + t), Math.max(a0, a1), gc.cy1, zf(hz0), smat);
   }
+  (geo.geoObs || []).filter((o) => o.mask && o.maskChosen).forEach((o) => {
+    const smat = mat.shelf?.color || bf;
+    const zf = (z) => cd - z;
+    const needL = !o.touchLeft, needR = !o.touchRight;
+    const needBack = !o.touchBack, needFront = !o.touchFront;
+    const eB = needBack ? t : 0, eF = needFront ? t : 0;
+    const mTop = o.maskTop ?? o.oy1;
+    if (needL) box(o.ox0 - t, o.oy0, zf(o.oz1 + eF), o.ox0, mTop, zf(o.oz0 - eB), smat);
+    if (needR) box(o.ox1, o.oy0, zf(o.oz1 + eF), o.ox1 + t, mTop, zf(o.oz0 - eB), smat);
+    if (needBack) box(o.ox0, o.oy0, zf(o.oz0), o.ox1, mTop, zf(o.oz0 - t), smat);
+    if (needFront) box(o.ox0, o.oy0, zf(o.oz1 + t), o.ox1, mTop, zf(o.oz1), smat);
+  });
 
   const tf = geo.tf;
   const handleBar = (d, z0trans, transform) => {
@@ -2518,19 +2930,39 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  const exportProject = () => {
+  const [transfer, setTransfer] = useState(null); // { mode:'export'|'import', text }
+
+  const exportProject = async () => {
+    const json = JSON.stringify({ cab, mat }, null, 2);
+    let copied = false;
     try {
-      const blob = new Blob([JSON.stringify({ cab, mat }, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      const safe = (cab.name || "szafka").replace(/[^\w\-]+/g, "_");
-      a.href = url;
-      a.download = `${safe}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setSaved("zapisano do pliku");
+      await navigator.clipboard.writeText(json);
+      copied = true;
     } catch (e) {
-      setSaved("nie udało się zapisać pliku");
+      copied = false;
+    }
+    setTransfer({ mode: "export", text: json });
+    setSaved(copied ? "skopiowano projekt do schowka" : "skopiuj tekst projektu");
+  };
+
+  const applyImportText = (raw) => {
+    try {
+      const d = JSON.parse(raw);
+      if (!d.cab) throw new Error("zły format");
+      const merged = { ...defaultCab, ...d.cab, version: defaultCab.version };
+      ["cutout", "obstacle", "backGroove", "plinth", "legs", "rail", "gaps", "joints"].forEach((k) => {
+        if (defaultCab[k] && typeof defaultCab[k] === "object")
+          merged[k] = { ...defaultCab[k], ...(d.cab[k] || {}) };
+      });
+      setCab(merged);
+      const mm = { ...defaultMaterials };
+      if (d.mat) Object.keys(mm).forEach((k) => { mm[k] = { ...mm[k], ...(d.mat[k] || {}) }; });
+      mm.mirror = { ...mm.mirror, color: defaultMaterials.mirror.color }; // kolor lustra staly
+      setMat(mm);
+      setSaved("wczytano projekt");
+      setTransfer(null);
+    } catch (err) {
+      setSaved("nieprawidłowy tekst projektu");
     }
   };
 
@@ -2538,24 +2970,7 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const d = JSON.parse(String(reader.result));
-        if (!d.cab) throw new Error("zły plik");
-        const merged = { ...defaultCab, ...d.cab };
-        ["cutout", "obstacle", "backGroove", "plinth", "legs", "rail", "gaps", "joints"].forEach((k) => {
-          if (defaultCab[k] && typeof defaultCab[k] === "object")
-            merged[k] = { ...defaultCab[k], ...(d.cab[k] || {}) };
-        });
-        setCab(merged); // przez historie, wiec mozna cofnac
-        const mm = { ...defaultMaterials };
-        if (d.mat) Object.keys(mm).forEach((k) => { mm[k] = { ...mm[k], ...(d.mat[k] || {}) }; });
-        setMat(mm);
-        setSaved("wczytano z pliku");
-      } catch (err) {
-        setSaved("nie udało się wczytać pliku");
-      }
-    };
+    reader.onload = () => applyImportText(String(reader.result));
     reader.readAsText(file);
     e.target.value = "";
   };
@@ -2563,6 +2978,8 @@ export default function App() {
   const [showDims, setShowDims] = useState(true);
   const [showGaps, setShowGaps] = useState(false);
   const [showLabels, setShowLabels] = useState(false);
+  const [showShelves, setShowShelves] = useState(false);
+  const [sideWhich, setSideWhich] = useState("left");
   const [yaw, setYaw] = useState(-0.55);
   const [pitch, setPitch] = useState(0.28);
   const [open3d, setOpen3d] = useState(false);
@@ -2574,7 +2991,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await storage.get("szafki:projekt");
+        const r = await window.storage.get("szafki:projekt");
         if (r) {
           const d = JSON.parse(r.value);
           const migratable = d.cab && d.cab.levels && Array.isArray(d.cab.levels);
@@ -2588,6 +3005,7 @@ export default function App() {
             setCabRaw(merged);
             const mm = { ...defaultMaterials };
             if (d.mat) Object.keys(mm).forEach((k) => { mm[k] = { ...mm[k], ...(d.mat[k] || {}) }; });
+            mm.mirror = { ...mm.mirror, color: defaultMaterials.mirror.color }; // kolor lustra staly
             setMat(mm);
             setSaved(
               d.cab.version === defaultCab.version
@@ -2607,7 +3025,7 @@ export default function App() {
     if (!loaded) return;
     const id = setTimeout(async () => {
       try {
-        await storage.set("szafki:projekt", JSON.stringify({ cab, mat }));
+        await window.storage.set("szafki:projekt", JSON.stringify({ cab, mat }));
         setSaved("zapisano " + new Date().toLocaleTimeString("pl-PL"));
       } catch (e) {
         setSaved("nie udało się zapisać");
@@ -2706,6 +3124,18 @@ export default function App() {
     editLevels((L) => (L[i].cols[j].drawers[k].h = v === "auto" ? "auto" : Number(v)));
   const setDrawerFront = (i, j, k, v) =>
     editLevels((L) => (L[i].cols[j].drawers[k].front = v === "" ? null : Math.round(Number(v))));
+  // lista elementow kolizyjnych (migracja ze starego pojedynczego pola)
+  const obsList = Array.isArray(cab.obstacles) && cab.obstacles.length
+    ? cab.obstacles
+    : cab.obstacle?.on ? [cab.obstacle] : [];
+  const writeObs = (arr) => set({ obstacles: arr, obstacle: { ...(cab.obstacle || {}), on: false } });
+  const addObstacle = () =>
+    writeObs([...obsList, { on: true, w: 80, d: 80, h: 0, side: "right", fromSide: 0,
+      fromBack: 0, fromBottom: 0, fullHeight: true, mask: true, maskType: "auto", maskFront: "over" }]);
+  const removeObstacle = (i) => writeObs(obsList.filter((_, k) => k !== i));
+  const setObstacle = (i, patch) =>
+    writeObs(obsList.map((o, k) => (k === i ? { ...o, ...patch } : o)));
+
   const setDrawerNL = (i, j, k, v) =>
     editLevels((L) => (L[i].cols[j].drawers[k].nl = v === "" ? null : Number(v)));
 
@@ -2738,6 +3168,15 @@ export default function App() {
 
   const clearColOpenings = (i, j) =>
     editLevels((L) => (L[i].cols[j].shelfTargets = L[i].cols[j].shelfTargets.map(() => null)));
+  // liczba polek = liczba swiatel minus 1, wiec dodanie polki to dodanie swiatla
+  const addShelf = (i, j) =>
+    editLevels((L) => L[i].cols[j].shelfTargets.push(null));
+  // usuwa polke przy wskazanym swietle — dwa swiatla lacza sie w jedno
+  const removeShelfAt = (i, j, k) =>
+    editLevels((L) => {
+      const st = L[i].cols[j].shelfTargets;
+      if (st.length > 1) st.splice(k, 1);
+    });
 
   const toggleEdge = (name, key, cur) =>
     set({
@@ -2814,10 +3253,12 @@ export default function App() {
             </button>
           </div>
           <button onClick={exportProject}
-            className="text-xs text-teal-700 hover:underline">Zapisz do pliku</button>
+            className="text-xs text-teal-700 hover:underline">Kopiuj projekt</button>
+          <button onClick={() => setTransfer({ mode: "import", text: "" })}
+            className="text-xs text-teal-700 hover:underline">Wklej projekt</button>
           <label className="cursor-pointer text-xs text-teal-700 hover:underline">
-            Wczytaj z pliku
-            <input type="file" accept="application/json" className="hidden"
+            Wczytaj plik
+            <input type="file" accept="application/json,.json,.txt" className="hidden"
               onChange={importProject} />
           </label>
           <button onClick={() => {
@@ -2840,7 +3281,14 @@ export default function App() {
               {warns.length} ostrzeżeń
             </button>
           )}
-          {errors.length === 0 && warns.length === 0 && (
+          {infos.length > 0 && (
+            <button onClick={scrollToNotes} title="Przejdź do podpowiedzi"
+              className="rounded-full px-2.5 py-1 text-xs font-medium text-stone-600 transition hover:brightness-95"
+              style={{ background: "#e7e5e4" }}>
+              {infos.length} {infos.length === 1 ? "podpowiedź" : "podpowiedzi"}
+            </button>
+          )}
+          {errors.length === 0 && warns.length === 0 && infos.length === 0 && (
             <span className="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-800">bez uwag</span>
           )}
         </div>
@@ -3257,10 +3705,17 @@ export default function App() {
                                   onChange={(v) => setColOpening(lv.i, c.j, o.k, v)} />
                                 <span className="w-12 shrink-0 text-right font-mono text-[11px]"
                                   style={{ color: o.h > 0 && o.h < 50 ? WARNC : "#a8a29e" }}>{fmt(o.h)}</span>
+                                {c.openings.length > 1 && (
+                                  <MiniBtn onClick={() => removeShelfAt(lv.i, c.j, o.k)}
+                                    title="Usuń półkę przy tym świetle">×</MiniBtn>
+                                )}
                               </div>
                             ))}
-                            <button onClick={() => clearColOpenings(lv.i, c.j)}
-                              className="text-[11px] text-teal-700 hover:underline">wszystkie równo</button>
+                            <div className="flex items-center gap-2 pt-1">
+                              <MiniBtn onClick={() => addShelf(lv.i, c.j)} tone="accent">+ półka</MiniBtn>
+                              <button onClick={() => clearColOpenings(lv.i, c.j)}
+                                className="text-[11px] text-teal-700 hover:underline">wszystkie równo</button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -3349,109 +3804,136 @@ export default function App() {
                   label="Zabuduj otwór maskownicą" />
                 {cab.cutout.mask !== false && (
                   <>
-                    <Field label="Typ zabudowy" hint={geo.geoCut?.maskChosen
-                      ? `Program wybrał: ${geo.geoCut.maskChosen === "U" ? "U (trzy ścianki)" : "L (dwie ścianki)"}`
-                      : "Auto dobiera L w narożniku, U przy ścianie."}>
-                      <Seg value={cab.cutout.maskType || "auto"}
-                        onChange={(v) => set({ cutout: { ...cab.cutout, maskType: v } })}
-                        options={[{ v: "auto", l: "Auto" }, { v: "L", l: "L" }, { v: "U", l: "U" }]} />
+                    <Field label="Który bok widoczny" hint="wycięcie narożnika zawsze zabudowuje się w L — jeden bok musi zachodzić na drugi">
+                      <Seg value={cab.cutout.maskCorner === "horizontal" ? "horizontal" : "vertical"}
+                        onChange={(v) => set({ cutout: { ...cab.cutout, maskCorner: v } })}
+                        options={[
+                          { v: "auto", l: "Auto" },
+                          { v: "vertical", l: "Boczna" },
+                          { v: "horizontal", l: "Czołowa" },
+                        ]} />
                     </Field>
-                    <Field label="Montaż czoła">
-                      <Seg value={cab.cutout.maskFront === "between" ? "between" : "over"}
-                        onChange={(v) => set({ cutout: { ...cab.cutout, maskFront: v } })}
-                        options={[{ v: "over", l: "Przed bokami" }, { v: "between", l: "Między bokami" }]} />
-                    </Field>
-                    {geo.geoCut?.maskChosen === "L" && (
-                      <Field label="Który bok widoczny" hint="jeden bok musi zachodzić na drugi — narożniki się nie stykają">
-                        <Seg value={cab.cutout.maskCorner === "horizontal" ? "horizontal" : "vertical"}
-                          onChange={(v) => set({ cutout: { ...cab.cutout, maskCorner: v } })}
-                          options={[{ v: "vertical", l: "Boczna" }, { v: "horizontal", l: "Czołowa" }]} />
-                      </Field>
+                    {geo.geoCut?.maskVisible && (
+                      <p className="text-xs text-stone-500">
+                        Widoczna ścianka: {geo.geoCut.maskVisible === "vertical" ? "boczna" : "czołowa"}.
+                      </p>
                     )}
                   </>
                 )}
+                <p className="text-xs text-stone-500">
+                  Formatki korpusu do zamówienia zostają pełnymi prostokątami — wycięcie
+                  robisz sam. Zabudowa jest liczona z płyty półek.
+                </p>
               </>
             )}
           </Card>
 
-          <Card title="Element kolizyjny">
-            <Check checked={!!cab.obstacle?.on}
-              onChange={(v) => set({ obstacle: { ...(cab.obstacle || {}), on: v } })}
-              label="Przeszkoda w szafce (rura, kanał wentylacyjny)" />
-            {cab.obstacle?.on && (
-              <>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Szerokość">
-                    <Num value={cab.obstacle.w ?? 80}
-                      onChange={(v) => set({ obstacle: { ...cab.obstacle, w: v } })} />
-                  </Field>
-                  <Field label="Głębokość">
-                    <Num value={cab.obstacle.d ?? 80}
-                      onChange={(v) => set({ obstacle: { ...cab.obstacle, d: v } })} />
-                  </Field>
-                </div>
-                <Field label="Liczone od boku">
-                  <Seg value={cab.obstacle.side === "left" ? "left" : "right"}
-                    onChange={(v) => set({ obstacle: { ...cab.obstacle, side: v } })}
-                    options={[{ v: "left", l: "Od lewej" }, { v: "right", l: "Od prawej" }]} />
-                </Field>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label={cab.obstacle.side === "left" ? "Od lewego boku" : "Od prawego boku"}
-                    hint="0 = przy tym boku">
-                    <Num value={cab.obstacle.fromSide ?? 0}
-                      onChange={(v) => set({ obstacle: { ...cab.obstacle, fromSide: v } })} />
-                  </Field>
-                  <Field label="Od tyłu" hint="0 = przy tylnej ścianie">
-                    <Num value={cab.obstacle.fromBack ?? 0}
-                      onChange={(v) => set({ obstacle: { ...cab.obstacle, fromBack: v } })} />
-                  </Field>
-                </div>
-                {geo.geoOb && (
-                  <div className="rounded bg-stone-50 px-3 py-2 font-mono text-xs text-stone-600">
-                    od lewej: {fmt(geo.geoOb.distLeft)} mm &nbsp;·&nbsp; od prawej: {fmt(geo.geoOb.distRight)} mm
-                  </div>
-                )}
-                <Check checked={cab.obstacle.fullHeight !== false}
-                  onChange={(v) => set({ obstacle: { ...cab.obstacle, fullHeight: v } })}
-                  label="Na całą wysokość szafki" />
-                {cab.obstacle.fullHeight === false && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="Od dna">
-                      <Num value={cab.obstacle.fromBottom ?? 0}
-                        onChange={(v) => set({ obstacle: { ...cab.obstacle, fromBottom: v } })} />
-                    </Field>
-                    <Field label="Wysokość bryły">
-                      <Num value={cab.obstacle.h ?? 0}
-                        onChange={(v) => set({ obstacle: { ...cab.obstacle, h: v } })} />
-                    </Field>
-                  </div>
-                )}
-                <Check checked={!!cab.obstacle.mask}
-                  onChange={(v) => set({ obstacle: { ...cab.obstacle, mask: v } })}
-                  label="Zabuduj element (odgrodź od wnętrza)" />
-                {cab.obstacle.mask && (
-                  <>
-                    <Field label="Typ zabudowy" hint={geo.geoOb?.maskChosen
-                      ? `Program wybrał: ${geo.geoOb.maskChosen === "U" ? "U (trzy ścianki)" : "L (dwie ścianki)"}`
-                      : "Auto dobiera L w narożniku, U przy ścianie lub w środku."}>
-                      <Seg value={cab.obstacle.maskType || "auto"}
-                        onChange={(v) => set({ obstacle: { ...cab.obstacle, maskType: v } })}
-                        options={[{ v: "auto", l: "Auto" }, { v: "L", l: "L" }, { v: "U", l: "U" }]} />
-                    </Field>
-                    <Field label="Montaż czoła">
-                      <Seg value={cab.obstacle.maskFront === "between" ? "between" : "over"}
-                        onChange={(v) => set({ obstacle: { ...cab.obstacle, maskFront: v } })}
-                        options={[{ v: "over", l: "Przed bokami" }, { v: "between", l: "Między bokami" }]} />
-                    </Field>
-                  </>
-                )}
-                <p className="text-xs text-stone-500">
-                  Wymiary od prawego tyłu. Przy 0 od prawego i 0 od tyłu bryła siada w prawym
-                  tylnym narożniku. Program ostrzeże, jeśli nie mieści się w świetle szafki,
-                  i sprawdzi kolizję z półkami i szufladami.
-                </p>
-              </>
+          <Card title="Elementy kolizyjne"
+            right={<MiniBtn onClick={addObstacle} tone="accent">+ element</MiniBtn>}>
+            {obsList.length === 0 && (
+              <p className="text-sm text-stone-400">
+                Brak przeszkód. Dodaj element, jeśli w szafce przebiega rura albo kanał wentylacyjny.
+              </p>
             )}
+            {obsList.map((ob, oi) => {
+              const g = (geo.geoObs || [])[oi];
+              return (
+                <div key={oi} className="space-y-3 rounded border border-stone-200 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-stone-600">
+                      {obsList.length > 1 ? `Element ${oi + 1}` : "Element kolizyjny"}
+                    </span>
+                    <MiniBtn onClick={() => removeObstacle(oi)} title="Usuń element">×</MiniBtn>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Szerokość">
+                      <Num value={ob.w ?? 80} onChange={(v) => setObstacle(oi, { w: v })} />
+                    </Field>
+                    <Field label="Głębokość">
+                      <Num value={ob.d ?? 80} onChange={(v) => setObstacle(oi, { d: v })} />
+                    </Field>
+                  </div>
+                  <Field label="Liczone od boku">
+                    <Seg value={ob.side === "left" ? "left" : "right"}
+                      onChange={(v) => setObstacle(oi, { side: v })}
+                      options={[{ v: "left", l: "Od lewej" }, { v: "right", l: "Od prawej" }]} />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label={ob.side === "left" ? "Od lewego boku" : "Od prawego boku"}
+                      hint="od zewnętrznej krawędzi szafki">
+                      <Num value={ob.fromSide ?? 0} onChange={(v) => setObstacle(oi, { fromSide: v })} />
+                    </Field>
+                    <Field label="Od tyłu" hint="od tylnej płaszczyzny">
+                      <Num value={ob.fromBack ?? 0} onChange={(v) => setObstacle(oi, { fromBack: v })} />
+                    </Field>
+                  </div>
+                  {g && (
+                    <div className="rounded bg-stone-50 px-3 py-2 font-mono text-xs text-stone-600">
+                      od lewej: {fmt(g.distLeft)} mm &nbsp;·&nbsp; od prawej: {fmt(g.distRight)} mm
+                    </div>
+                  )}
+                  <Check checked={ob.fullHeight !== false}
+                    onChange={(v) => setObstacle(oi, { fullHeight: v })}
+                    label="Na całą wysokość szafki" />
+                  {ob.fullHeight === false && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Od dna">
+                        <Num value={ob.fromBottom ?? 0} onChange={(v) => setObstacle(oi, { fromBottom: v })} />
+                      </Field>
+                      <Field label="Wysokość bryły">
+                        <Num value={ob.h ?? 0} onChange={(v) => setObstacle(oi, { h: v })} />
+                      </Field>
+                    </div>
+                  )}
+                  <Check checked={!!ob.mask} onChange={(v) => setObstacle(oi, { mask: v })}
+                    label="Zabuduj element (odgrodź od wnętrza)" />
+                  {ob.mask && (
+                    <>
+                      <Field label="Typ zabudowy" hint={g?.maskChosen
+                        ? `Program wybrał: ${g.maskChosen === "U" ? "U (trzy ścianki)" : "L (dwie ścianki)"}`
+                        : "Auto dobiera L w narożniku, U przy ścianie lub w środku."}>
+                        <Seg value={ob.maskType || "auto"}
+                          onChange={(v) => setObstacle(oi, { maskType: v })}
+                          options={[{ v: "auto", l: "Auto" }, { v: "L", l: "L" }, { v: "U", l: "U" }]} />
+                      </Field>
+                      {g?.shelfAbove != null && (
+                        <>
+                          <Check checked={!!ob.maskToShelf}
+                            onChange={(v) => setObstacle(oi, { maskToShelf: v })}
+                            label={`Zabudowa tylko do półki (${fmt(g.shelfAbove)} mm)`} />
+                          {ob.maskToShelf && (
+                            <Field label="Wysokość zabudowy"
+                              hint="puste = do półki; wpisz, jeśli ma być inna">
+                              <Num value={ob.maskH ?? ""} placeholder={String(Math.round(g.shelfAbove - (g.oy0 ?? 0)))}
+                                onChange={(v) => setObstacle(oi, { maskH: v })} />
+                            </Field>
+                          )}
+                        </>
+                      )}
+                      {g?.maskChosen === "U" && (
+                        <Field label="Montaż czoła">
+                          <Seg value={ob.maskFront === "between" ? "between" : "over"}
+                            onChange={(v) => setObstacle(oi, { maskFront: v })}
+                            options={[{ v: "over", l: "Przed bokami" }, { v: "between", l: "Między bokami" }]} />
+                        </Field>
+                      )}
+                      {g?.maskChosen === "L" && (
+                        <Field label="Który bok widoczny" hint="jeden bok musi zachodzić na drugi">
+                          <Seg value={ob.maskCorner === "horizontal" ? "horizontal" : "vertical"}
+                            onChange={(v) => setObstacle(oi, { maskCorner: v })}
+                            options={[{ v: "vertical", l: "Boczna" }, { v: "horizontal", l: "Czołowa" }]} />
+                        </Field>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            <p className="text-xs text-stone-500">
+              Odległości liczone od zewnętrznych krawędzi szafki, tak samo jak przy wycięciu
+              narożnika. Przy 0 i 0 bryła siada w narożniku i skraca bok oraz plecy dokładnie
+              tak jak wycięcie.
+            </p>
           </Card>
 
           <Card title="Cokół i wzmocnienie">
@@ -3523,7 +4005,9 @@ export default function App() {
               "back",
               "mirror",
             ].map((k) => (
-              <div key={k} className="grid grid-cols-[1fr_80px_44px] items-end gap-2 border-t border-stone-100 pt-3 first:border-0 first:pt-0">
+              <div key={k} className="space-y-2 border-t border-stone-100 pt-3 first:border-0 first:pt-0">
+                <div className="flex items-end gap-2">
+                <div className="flex-1">
                 <Field label={
                   k === "board"
                     ? "Korpus" +
@@ -3537,24 +4021,36 @@ export default function App() {
                     onChange={(e) => setMat({ ...mat, [k]: { ...mat[k], name: e.target.value } })}
                     className="w-full rounded border border-stone-300 bg-white px-2 py-1.5 text-sm focus:border-teal-600 focus:outline-none" />
                 </Field>
+                </div>
+                <div className="w-20">
                 <Field label="Grubość">
                   <Num value={mat[k].thickness}
                     onChange={(v) => setMat({ ...mat, [k]: { ...mat[k], thickness: v } })} suffix="" />
                 </Field>
-                <input type="color" value={mat[k].color}
-                  onChange={(e) => setMat({ ...mat, [k]: { ...mat[k], color: e.target.value } })}
-                  className="h-9 w-11 cursor-pointer rounded border border-stone-300 bg-white" />
-                <div className="col-span-3 flex flex-wrap gap-1">
-                  {PALETA.map(([nazwa, hex]) => (
-                    <button key={hex} title={nazwa}
-                      onClick={() => setMat({ ...mat, [k]: { ...mat[k], color: hex } })}
-                      className={"h-6 w-6 rounded border transition-transform hover:scale-110 " +
-                        (mat[k].color.toLowerCase() === hex.toLowerCase()
-                          ? "border-teal-700 ring-1 ring-teal-700"
-                          : "border-stone-300")}
-                      style={{ background: hex }} />
-                  ))}
                 </div>
+                {k === "mirror" ? (
+                  <div className="h-9 w-11 rounded border border-stone-300"
+                    style={{ background: mat[k].color }}
+                    title="Kolor lustra jest stały" />
+                ) : (
+                  <input type="color" value={mat[k].color}
+                    onChange={(e) => setMat({ ...mat, [k]: { ...mat[k], color: e.target.value } })}
+                    className="h-9 w-11 cursor-pointer rounded border border-stone-300 bg-white" />
+                )}
+                </div>
+                {k !== "mirror" && (
+                  <div className="flex flex-wrap gap-1">
+                    {PALETA.map(([nazwa, hex]) => (
+                      <button key={hex} title={nazwa}
+                        onClick={() => setMat({ ...mat, [k]: { ...mat[k], color: hex } })}
+                        className={"h-6 w-6 rounded border transition-transform hover:scale-110 " +
+                          (mat[k].color.toLowerCase() === hex.toLowerCase()
+                            ? "border-teal-700 ring-1 ring-teal-700"
+                            : "border-stone-300")}
+                        style={{ background: hex }} />
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
             <Check checked={cab.grainMatters} onChange={(v) => set({ grainMatters: v })}
@@ -3579,6 +4075,18 @@ export default function App() {
                   className="text-xs text-teal-700 hover:underline">
                   {cab.realColors ? "Rozróżnij fronty" : "Realne kolory"}
                 </button>
+                {view === "side" && (
+                  <button onClick={() => setSideWhich((s) => (s === "left" ? "right" : "left"))}
+                    className="text-xs text-teal-700 hover:underline">
+                    {sideWhich === "left" ? "Pokaż prawy bok" : "Pokaż lewy bok"}
+                  </button>
+                )}
+                {view === "top" && (
+                  <button onClick={() => setShowShelves((s) => !s)}
+                    className="text-xs text-teal-700 hover:underline">
+                    {showShelves ? "Ukryj półki" : "Rysuj półki"}
+                  </button>
+                )}
                 {(view === "closed" || view === "open") && (
                   <button onClick={() => setShowLabels((s) => !s)}
                     className="text-xs text-teal-700 hover:underline">
@@ -3643,9 +4151,9 @@ export default function App() {
                   </div>
                 </div>
               ) : view === "side" ? (
-                <SideView cab={cab} geo={geo} mat={mat} showDims={showDims} />
+                <SideView cab={cab} geo={geo} mat={mat} showDims={showDims} which={sideWhich} />
               ) : view === "top" ? (
-                <TopView cab={cab} geo={geo} mat={mat} showDims={showDims} />
+                <TopView cab={cab} geo={geo} mat={mat} showDims={showDims} showShelves={showShelves} />
               ) : view === "rear" ? (
                 <RearView cab={cab} geo={geo} mat={mat} showDims={showDims} />
               ) : (
@@ -3657,17 +4165,28 @@ export default function App() {
           {(errors.length > 0 || warns.length > 0 || infos.length > 0) && (
             <div ref={notesRef} className="scroll-mt-24">
             <Card title="Uwagi">
-              <ul className="space-y-2">
-                {errors.map((m, i) => (
-                  <NoteLine key={"e" + i} text={m.text} color={ERRC} icon="×" editLevels={editLevels} cab={cab} />
-                ))}
-                {warns.map((m, i) => (
-                  <NoteLine key={"w" + i} text={m.text} color={WARNC} icon="!" editLevels={editLevels} cab={cab} />
-                ))}
-                {infos.map((m, i) => (
-                  <NoteLine key={"i" + i} text={m.text} color="#78716c" icon="i" editLevels={editLevels} cab={cab} />
-                ))}
-              </ul>
+              {(errors.length > 0 || warns.length > 0) && (
+                <ul className="space-y-2">
+                  {errors.map((m, i) => (
+                    <NoteLine key={"e" + i} text={m.text} color={ERRC} icon="×" editLevels={editLevels} cab={cab} />
+                  ))}
+                  {warns.map((m, i) => (
+                    <NoteLine key={"w" + i} text={m.text} color={WARNC} icon="!" editLevels={editLevels} cab={cab} />
+                  ))}
+                </ul>
+              )}
+              {infos.length > 0 && (
+                <div className={(errors.length || warns.length) ? "border-t border-stone-100 pt-3" : ""}>
+                  <div className="mb-2 text-xs font-medium uppercase tracking-wider text-stone-400">
+                    Podpowiedzi — nic nie trzeba poprawiać
+                  </div>
+                  <ul className="space-y-2">
+                    {infos.map((m, i) => (
+                      <NoteLine key={"i" + i} text={m.text} color="#78716c" icon="i" editLevels={editLevels} cab={cab} />
+                    ))}
+                  </ul>
+                </div>
+              )}
             </Card>
             </div>
           )}
@@ -3820,6 +4339,48 @@ export default function App() {
 
         </div>
       </main>
+
+      {transfer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4"
+          onClick={() => setTransfer(null)}>
+          <div className="w-full max-w-2xl rounded-lg bg-white p-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-2 text-sm font-semibold text-stone-800">
+              {transfer.mode === "export" ? "Kopia projektu" : "Wklej projekt"}
+            </h3>
+            <p className="mb-2 text-xs text-stone-500">
+              {transfer.mode === "export"
+                ? "Zaznacz i skopiuj poniższy tekst, wklej go do pliku tekstowego albo notatki. Tak zachowasz projekt niezależnie od przeglądarki."
+                : "Wklej tutaj wcześniej skopiowany tekst projektu."}
+            </p>
+            <textarea
+              readOnly={transfer.mode === "export"}
+              value={transfer.text}
+              onChange={(e) => setTransfer({ ...transfer, text: e.target.value })}
+              onFocus={(e) => transfer.mode === "export" && e.target.select()}
+              className="h-64 w-full rounded border border-stone-300 p-2 font-mono text-[11px] focus:border-teal-600 focus:outline-none" />
+            <div className="mt-3 flex justify-end gap-2">
+              <button onClick={() => setTransfer(null)}
+                className="rounded px-3 py-1.5 text-sm text-stone-600 hover:bg-stone-100">Zamknij</button>
+              {transfer.mode === "export" ? (
+                <button
+                  onClick={async () => {
+                    try { await navigator.clipboard.writeText(transfer.text); setSaved("skopiowano do schowka"); }
+                    catch { setSaved("zaznacz tekst i skopiuj ręcznie"); }
+                  }}
+                  className="rounded bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
+                  Kopiuj do schowka
+                </button>
+              ) : (
+                <button onClick={() => applyImportText(transfer.text)}
+                  className="rounded bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
+                  Wczytaj projekt
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
