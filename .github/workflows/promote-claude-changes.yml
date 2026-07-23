@@ -1,0 +1,73 @@
+name: Promote Claude Changes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  promote:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Ensure Claude buffer is not empty
+        run: |
+          lines=$(wc -l < claude-zmiany.txt)
+          if [ "$lines" -lt 100 ]; then
+            echo "claude-zmiany.txt has only $lines lines; paste the full Claude JSX first."
+            exit 1
+          fi
+
+      - name: Promote Claude buffer to app source
+        run: cp claude-zmiany.txt szafki.jsx
+
+      - name: Install web dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Validate promoted app with Vite build
+        run: npm run build
+
+      - name: Regenerate standalone preview
+        run: node scripts/generate-standalone.mjs
+
+      - name: Commit promoted changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add szafki.jsx standalone.html
+          if git diff --cached --quiet; then
+            echo "No promoted changes to commit."
+          else
+            git commit -m "Promote Claude changes"
+            git push
+          fi
+
+      - name: Prepare static preview
+        run: |
+          mkdir web-preview
+          cp standalone.html web-preview/index.html
+          cp standalone.html preview.html szafki.jsx web-preview/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static preview
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web-preview
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
