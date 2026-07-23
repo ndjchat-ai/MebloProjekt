@@ -43,11 +43,6 @@ Po włączeniu GitHub Pages ze źródłem `GitHub Actions`, workflow `Deploy Web
 
 Jeśli nie chcesz używać Pages, możesz też pobrać `standalone.html` z repozytorium i otworzyć go dwuklikiem w przeglądarce. Plik zawiera kod aplikacji w środku, więc nie potrzebuje `localhost`; wymaga tylko internetu do pobrania React, Babel i Tailwind z CDN.
 
-## Wymiana zmian z Claude
-
-Docelowym plikiem aplikacji jest `szafki.jsx`. Ten plik można wkleić do Claude jako komponent React/JSX do dalszych szybkich testów. Nie wklejaj do Claude `standalone.html`, bo to jest wygenerowany podgląd HTML z osadzonym kodem aplikacji.
-
-Jeśli Claude wygeneruje nową wersję albo większą zmianę, wklej ją do `claude-zmiany.jsx`. Ten plik jest tylko buforem porównawczym: aplikacja go nie uruchamia, workflow GitHub Pages go nie publikuje, a zmiany przenosimy ręcznie do `szafki.jsx` po sprawdzeniu składni i logiki.
 
 ## Budowanie
 
