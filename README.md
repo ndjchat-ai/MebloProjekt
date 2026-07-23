@@ -22,6 +22,28 @@ Pierwszy szkielet natywnej aplikacji Android do projektowania prostych mebli z p
 
 `applicationId` jest roboczy: `pl.mebloprojekt.app`. Przed pierwszym podpisanym wydaniem produkcyjnym trzeba ustalić finalny identyfikator, ponieważ później nie powinien się zmieniać.
 
+
+## Podgląd webowy bez instalowania npm
+
+Możesz uruchomić podgląd podobnie do artefaktu Claude, bez budowania projektu:
+
+```bash
+python3 -m http.server 5173
+```
+
+Następnie otwórz w przeglądarce:
+
+```txt
+http://localhost:5173/preview.html
+```
+
+`preview.html` ładuje React, ReactDOM, Babel Standalone i Tailwind z CDN, pobiera lokalny plik `szafki.jsx`, kompiluje JSX w przeglądarce i montuje aplikację w `#root`.
+
+Po włączeniu GitHub Pages ze źródłem `GitHub Actions`, workflow `Deploy Web Preview` publikuje podgląd automatycznie po zmianach na `main`/`master` albo ręcznie z zakładki Actions. Strona główna Pages używa `standalone.html` jako `index.html`, więc link GitHub Pages otwiera aplikację od razu.
+
+Jeśli nie chcesz używać Pages, możesz też pobrać `standalone.html` z repozytorium i otworzyć go dwuklikiem w przeglądarce. Plik zawiera kod aplikacji w środku, więc nie potrzebuje `localhost`; wymaga tylko internetu do pobrania React, Babel i Tailwind z CDN.
+
+
 ## Budowanie
 
 Projekt jest skonfigurowany dla Android SDK 36, AGP 8.13.2, Kotlin 2.3.21 i Jetpack Compose.
