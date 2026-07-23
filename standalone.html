@@ -1491,6 +1491,7 @@ function FrontView({ cab, geo, mat, open, showDims, showGaps, showLabels }) {
     ? mat.board.color : mat.front.color;
   const { W, H } = cab;
   const pad = 160;
+  const t = geo.t;
   const belowExtra = Math.max(cab.legs?.on ? cab.legs.height || 100 : 0, geo.plinthH || 0) + 60;
   const leftExtra = cab.legs?.on || cab.plinth.on ? 80 : 0;
   const rightExtraF = cab.legs?.on || cab.plinth.on ? 320 : 0;
@@ -1498,23 +1499,39 @@ function FrontView({ cab, geo, mat, open, showDims, showGaps, showLabels }) {
   const fy = (y) => H - y;
   const bf = mat.board.color;
   const ff = frontColor;
-  const t = geo.t;
+  const topY = 0;
+  const bottomY = fy(geo.bottomY + t);
+  const leftTopY = fy(geo.leftY0 + geo.leftLen);
+  const leftBottomY = fy(geo.leftY0);
+  const rightTopY = fy(geo.rightY0 + geo.rightLen);
+  const rightBottomY = fy(geo.rightY0);
+  const showSideLengthDims = showDims && (geo.leftLen !== H || geo.rightLen !== H);
+  const sidePanel = (key, x, y, h, topCap, bottomCap) => (
+    <g key={key}>
+      <rect x={x} y={y} width={t} height={h} fill={bf} />
+      <line x1={x} y1={y} x2={x} y2={y + h} stroke={INK} strokeWidth="2" />
+      <line x1={x + t} y1={y} x2={x + t} y2={y + h} stroke={INK} strokeWidth="2" />
+      {topCap && <line x1={x} y1={y} x2={x + t} y2={y} stroke={INK} strokeWidth="2" />}
+      {bottomCap && <line x1={x} y1={y + h} x2={x + t} y2={y + h} stroke={INK} strokeWidth="2" />}
+    </g>
+  );
+  const carcassFrame = (key) => (
+    <g key={key}>
+      {sidePanel("left-side", 0, leftTopY, geo.leftLen, geo.topL === "between", geo.botL === "between")}
+      {sidePanel("right-side", W - t, rightTopY, geo.rightLen, geo.topR === "between", geo.botR === "between")}
+      <rect x={geo.topX0} y={topY} width={geo.topX1 - geo.topX0} height={t}
+        fill={bf} stroke={INK} strokeWidth="2" strokeLinejoin="miter" />
+      <rect x={geo.botX0} y={bottomY} width={geo.botX1 - geo.botX0} height={t}
+        fill={bf} stroke={INK} strokeWidth="2" strokeLinejoin="miter" />
+    </g>
+  );
 
   return (
     <svg viewBox={vb} className="w-full h-auto" style={{ maxHeight: 540 }}>
-      <rect x="0" y="0" width={W} height={H} fill="#fafaf9" stroke={LINE} strokeWidth="1.5" />
+      <rect x="0" y="0" width={W} height={H} fill="#fafaf9" stroke="#e7e5e4" strokeWidth="1" />
 
-      {/* boki */}
-      <rect x="0" y={fy(geo.leftY0 + geo.leftLen)} width={t} height={geo.leftLen}
-        fill={bf} stroke={INK} strokeWidth="2" />
-      <rect x={W - t} y={fy(geo.rightY0 + geo.rightLen)} width={t} height={geo.rightLen}
-        fill={bf} stroke={INK} strokeWidth="2" />
-      {/* wieniec */}
-      <rect x={geo.topX0} y="0" width={geo.topX1 - geo.topX0} height={t}
-        fill={bf} stroke={INK} strokeWidth="2" />
-      {/* dno */}
-      <rect x={geo.botX0} y={fy(geo.bottomY + t)} width={geo.botX1 - geo.botX0} height={t}
-        fill={bf} stroke={INK} strokeWidth="2" />
+      {/* boki, wieniec, dno */}
+      {carcassFrame("carcass-frame")}
 
       {geo.plinthInBody && (
         <rect x={geo.interior.x0} y={fy(geo.plinthH)} width={geo.innerW} height={geo.plinthH}
@@ -1669,6 +1686,8 @@ function FrontView({ cab, geo, mat, open, showDims, showGaps, showLabels }) {
       )}
 
       {/* szczeliny — realne 2 mm bylyby niewidoczne, wiec zaznaczamy je znacznikiem */}
+      {open && carcassFrame("carcass-frame-open-overlay")}
+
       {showGaps && !open &&
         geo.levels.flatMap((lv) => {
           const band = geo.doors
@@ -1792,6 +1811,14 @@ function FrontView({ cab, geo, mat, open, showDims, showGaps, showLabels }) {
         <>
           <DimH x1={0} x2={W} y={-50} label={`${fmt(W)}`} />
           <DimV y1={0} y2={H} x={-50} label={`${fmt(H)}`} />
+          {showSideLengthDims && (
+            <>
+              <DimV y1={leftTopY} y2={leftBottomY} x={-105}
+                label={`bok L ${fmt(geo.leftLen)}`} c={LINE} />
+              <DimV y1={rightTopY} y2={rightBottomY} x={W + 105}
+                label={`bok P ${fmt(geo.rightLen)}`} left={false} c={LINE} />
+            </>
+          )}
           {(cab.legs?.on || cab.plinth.on) && (() => {
             const legH = cab.legs?.on ? cab.legs.height || 100 : 0;
             const plH = cab.plinth.on && !geo.plinthInBody ? geo.plinthH : 0;
