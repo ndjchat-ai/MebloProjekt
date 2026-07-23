@@ -1,0 +1,9 @@
+// Tymczasowy plik do wklejania kodu z Claude.
+//
+// Zasada pracy:
+// - wklej tutaj pełny kod JSX wygenerowany/testowany w Claude,
+// - ten plik NIE jest uruchamiany przez aplikację i NIE trafia do GitHub Pages,
+// - traktujemy go jako materiał porównawczy do przeniesienia zmian do `szafki.jsx`,
+// - docelowym plikiem aplikacji pozostaje `szafki.jsx`.
+//
+// Jeśli wklejasz kod z Claude, najlepiej zastąp całą zawartość tego pliku.
