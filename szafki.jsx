@@ -3368,7 +3368,8 @@ export default function App() {
                           options={[{ v: "vertical", l: "Boczna" }, { v: "horizontal", l: "Czołowa" }]} />
                       </Field>
                     )}
-                </p>
+                  </>
+                )}
               </>
             )}
           </Card>
